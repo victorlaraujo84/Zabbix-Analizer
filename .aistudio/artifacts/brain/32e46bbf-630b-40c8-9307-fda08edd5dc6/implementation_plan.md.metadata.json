@@ -1,0 +1,6 @@
+{
+  "summary":  "Plano de implementação para alinhar estritamente os prompts de IA gerados com os filtros atualmente selecionados pelo usuário, incluindo bloco detalhado de escopo no topo e adaptação dinâmica das diretrizes e instruções da IA de acordo com os filtros de host, severidade, período, status, duração e tags.",
+  "updatedAt":  "2026-10-20T21:26:30.443261701Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
