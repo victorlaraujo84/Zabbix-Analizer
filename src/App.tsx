@@ -9,6 +9,7 @@ import { getSampleZabbixEvents } from './data/sampleData';
 import {
   filterEvents,
   computeKPIs,
+  computeComparativeMetrics,
   generateExecutiveSummary,
   generateTriggerTuningPrompt,
   generateExecutiveReportPrompt,
@@ -23,6 +24,17 @@ import {
   saveSessionToHistory,
   deleteSessionFromHistory,
 } from './utils/storage';
+import {
+  initializeSaaSDB,
+  getCurrentUser,
+  getActiveCompany,
+  getClients,
+  logoutUser,
+  getActiveTriggerCatalog,
+  SaaSUser,
+  SaaSCompany,
+  SaaSClient,
+} from './utils/saasDB';
 import { Header } from './components/Header';
 import { UploadZone } from './components/UploadZone';
 import { KPICards } from './components/KPICards';
@@ -33,6 +45,15 @@ import { TrendsView } from './components/TrendsView';
 import { EventsTable } from './components/EventsTable';
 import { PromptModal } from './components/PromptModal';
 import { SessionsModal } from './components/SessionsModal';
+import { ReportModal } from './components/ReportModal';
+import { PresentationModal } from './components/PresentationModal';
+import { DeepSeekPanel } from './components/DeepSeekPanel';
+import { ClientsView } from './components/ClientsView';
+import { SettingsView } from './components/SettingsView';
+import { ReportsView } from './components/ReportsView';
+import { TriggerFactoryView } from './components/TriggerFactoryView';
+import { AuthView } from './components/AuthView';
+import { ZabbixSyntaxValidatorModal } from './components/ZabbixSyntaxValidatorModal';
 import { X, CheckCircle2, LayoutDashboard, TrendingUp } from 'lucide-react';
 
 const DEFAULT_CHART_CONFIGS: ChartItemConfig[] = [
@@ -100,6 +121,8 @@ const INITIAL_FILTERS: ZabbixFilters = {
   duracaoPreset: 'all',
   duracaoMinMinutos: '',
   duracaoMaxMinutos: '',
+  zabbixFunction: 'todas',
+  expressionQuery: '',
 };
 
 export default function App() {
@@ -112,6 +135,58 @@ export default function App() {
     }
     return 'light';
   });
+
+  // SaaS Multi-tenant & Roteamento por Hash
+  const [route, setRoute] = useState<string>(() => {
+    if (typeof window !== 'undefined' && window.location.hash) {
+      return window.location.hash;
+    }
+    return '#/app';
+  });
+
+  const [currentUser, setCurrentUser] = useState<SaaSUser | null>(() => getCurrentUser());
+  const [company, setCompany] = useState<SaaSCompany>(() => getActiveCompany());
+  const [clients, setClients] = useState<SaaSClient[]>(() => getClients());
+  const [selectedClientId, setSelectedClientId] = useState<string>('');
+
+  // Inicializa banco SaaS com seed seguro se necessário
+  useEffect(() => {
+    initializeSaaSDB().then(() => {
+      setCurrentUser(getCurrentUser());
+      setCompany(getActiveCompany());
+      setClients(getClients());
+    });
+  }, []);
+
+  // Monitora alterações na hash da URL
+  useEffect(() => {
+    const handleHashChange = () => {
+      setRoute(window.location.hash || '#/app');
+      // Atualiza dados SaaS que possam ter sido alterados em telas de configurações
+      setCompany(getActiveCompany());
+      setClients(getClients());
+    };
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
+
+  const navigateTo = (newRoute: string) => {
+    window.location.hash = newRoute;
+    setRoute(newRoute);
+  };
+
+  const handleLogout = () => {
+    logoutUser();
+    setCurrentUser(null);
+    navigateTo('#/login');
+  };
+
+  const handleAuthSuccess = (user: SaaSUser) => {
+    setCurrentUser(user);
+    setCompany(getActiveCompany());
+    setClients(getClients());
+    navigateTo('#/app');
+  };
 
   // Alternador de visão: Dashboard vs Visão de Tendências (Trends)
   const [activeView, setActiveView] = useState<'dashboard' | 'trends'>('dashboard');
@@ -151,6 +226,29 @@ export default function App() {
   const [isSessionsModalOpen, setIsSessionsModalOpen] = useState(false);
   const [isTuningPromptOpen, setIsTuningPromptOpen] = useState(false);
   const [isExecutivePromptOpen, setIsExecutivePromptOpen] = useState(false);
+  const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+  const [isPresentationModalOpen, setIsPresentationModalOpen] = useState(false);
+  const [activeAiNarrative, setActiveAiNarrative] = useState<string | undefined>(undefined);
+
+  // Estados do Validador de Sintaxe Zabbix 7.0 & Histerese (Fase 3)
+  const [isValidatorModalOpen, setIsValidatorModalOpen] = useState(false);
+  const [validatorProblemExpr, setValidatorProblemExpr] = useState('');
+  const [validatorRecoveryExpr, setValidatorRecoveryExpr] = useState('');
+  const [validatorTriggerName, setValidatorTriggerName] = useState('');
+  const [validatorHostName, setValidatorHostName] = useState('');
+
+  const handleOpenValidator = (
+    problemExpr: string = '',
+    recoveryExpr: string = '',
+    triggerName: string = '',
+    hostName: string = ''
+  ) => {
+    setValidatorProblemExpr(problemExpr);
+    setValidatorRecoveryExpr(recoveryExpr);
+    setValidatorTriggerName(triggerName);
+    setValidatorHostName(hostName);
+    setIsValidatorModalOpen(true);
+  };
 
   // Aplica classe .dark no HTML element
   useEffect(() => {
@@ -273,8 +371,13 @@ export default function App() {
 
   // KPIs calculados sobre os dados filtrados
   const kpis = useMemo(() => {
-    return computeKPIs(filteredEvents);
-  }, [filteredEvents]);
+    return computeKPIs(filteredEvents, filters);
+  }, [filteredEvents, filters]);
+
+  // Métricas comparativas de período (MTTR, MTBF, Volumetria lado a lado)
+  const comparativeMetrics = useMemo(() => {
+    return computeComparativeMetrics(rawEvents, filters);
+  }, [rawEvents, filters]);
 
   // Comparativo de tendências (Período atual vs Período anterior equivalente)
   const trendsComparison = useMemo(() => {
@@ -287,44 +390,136 @@ export default function App() {
   }, [filteredEvents, kpis]);
 
   // Prompts gerados dinamicamente seguindo rigorosamente os filtros selecionados
+  // Cliente atualmente selecionado para escopo
+  const selectedClient = useMemo(() => {
+    if (!selectedClientId) return undefined;
+    return clients.find((c) => c.id === selectedClientId);
+  }, [clients, selectedClientId]);
+
+  // Catálogo de Triggers & Expressões vinculado ao cliente selecionado ou global
+  const activeTriggerCatalog = useMemo(() => {
+    return getActiveTriggerCatalog(selectedClientId);
+  }, [selectedClientId, clients]);
+
   const triggerTuningPrompt = useMemo(() => {
-    return generateTriggerTuningPrompt(filteredEvents, kpis, filters, rawEvents.length);
-  }, [filteredEvents, kpis, filters, rawEvents.length]);
+    return generateTriggerTuningPrompt(filteredEvents, kpis, filters, rawEvents.length, activeTriggerCatalog);
+  }, [filteredEvents, kpis, filters, rawEvents.length, activeTriggerCatalog]);
 
   const executiveReportPrompt = useMemo(() => {
     return generateExecutiveReportPrompt(filteredEvents, kpis, filters, rawEvents.length);
   }, [filteredEvents, kpis, filters, rawEvents.length]);
 
   // Atalho ao clicar em um Host específico
-  const handleFilterHost = (hostName: string) => {
+  const handleFilterHost = (hostInput: any) => {
+    const cleanHost = typeof hostInput === 'object' && hostInput !== null
+      ? (hostInput.host || String(hostInput))
+      : String(hostInput || '');
+    if (!cleanHost || cleanHost === 'Nenhum') return;
     setFilters((prev) => ({
       ...prev,
-      hosts: [hostName],
+      hosts: [cleanHost],
     }));
   };
 
   // Atalho ao clicar em uma Trigger específica
-  const handleFilterTrigger = (triggerName: string) => {
+  const handleFilterTrigger = (triggerInput: any) => {
+    const cleanTrigger = typeof triggerInput === 'object' && triggerInput !== null
+      ? (triggerInput.trigger || triggerInput.name || String(triggerInput))
+      : String(triggerInput || '');
+    if (!cleanTrigger || cleanTrigger === 'Nenhuma') return;
     setFilters((prev) => ({
       ...prev,
-      triggers: [triggerName],
+      triggers: [cleanTrigger],
     }));
   };
 
+  // ROTEAMENTO SAAS:
+  // Se usuário não estiver logado, exibe tela de login/signup
+  if (!currentUser) {
+    const isSignup = route === '#/signup';
+    return (
+      <AuthView
+        initialMode={isSignup ? 'signup' : 'login'}
+        onAuthSuccess={handleAuthSuccess}
+      />
+    );
+  }
+
+  // Visualização de Clientes (#/clients)
+  if (route === '#/clients') {
+    return (
+      <ClientsView
+        onBackToApp={() => navigateTo('#/app')}
+        onSelectClientForAnalysis={(c) => {
+          setSelectedClientId(c.id);
+          navigateTo('#/app');
+        }}
+      />
+    );
+  }
+
+  // Visualização de Configurações (#/settings)
+  if (route === '#/settings') {
+    return (
+      <SettingsView
+        onBackToApp={() => navigateTo('#/app')}
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
+      />
+    );
+  }
+
+  // Visualização de Histórico de Relatórios (#/reports)
+  if (route === '#/reports') {
+    return <ReportsView onBackToApp={() => navigateTo('#/app')} />;
+  }
+
+  // Visualização da Fábrica de Triggers (#/trigger-factory)
+  if (route === '#/trigger-factory') {
+    return (
+      <TriggerFactoryView
+        onBackToApp={() => navigateTo('#/app')}
+        clients={clients}
+        selectedClientId={selectedClientId}
+        onSelectClient={setSelectedClientId}
+        events={filteredEvents}
+        kpis={kpis}
+        onOpenValidator={(p, r, t, h) => handleOpenValidator(p, r, t, h)}
+      />
+    );
+  }
+
+
+
+  // TELA PRINCIPAL (DASHBOARD CORE: #/app ou raiz)
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors">
-      {/* Barra de Navegação Top Bar */}
+      {/* Barra de Navegação Top Bar com White-label, Seletor de Clientes e Roteamento */}
       <Header
         theme={theme}
         onToggleTheme={handleToggleTheme}
         onOpenUpload={() => setIsUploadModalOpen(true)}
         onOpenChartConfig={() => setIsChartConfigOpen(true)}
         onOpenSessions={() => setIsSessionsModalOpen(true)}
+        onOpenReportModal={() => {
+          setActiveAiNarrative(undefined);
+          setIsReportModalOpen(true);
+        }}
+        onOpenPresentationModal={() => setIsPresentationModalOpen(true)}
+        onOpenValidator={() => handleOpenValidator()}
         onResetFilters={handleResetFilters}
         hasData={rawEvents.length > 0}
         totalFiltered={filteredEvents.length}
         totalRaw={rawEvents.length}
         savedSessionsCount={savedSessions.length}
+        company={company}
+        currentUser={currentUser}
+        clients={clients}
+        selectedClientId={selectedClientId}
+        onSelectClient={setSelectedClientId}
+        activeRoute={route}
+        onNavigate={navigateTo}
+        onLogout={handleLogout}
       />
 
       {/* Toast de Notificação */}
@@ -350,18 +545,38 @@ export default function App() {
           />
         </main>
       ) : (
-        /* Dashboard Principal com Filtros, KPIs, Gráficos e Tabela */
+        /* Dashboard Principal com Filtros, KPIs, Gráficos e Tabela (Núcleo 100% Preservado) */
         <main className="p-4 lg:p-6 max-w-[1720px] mx-auto">
+          {/* Painel de Diagnóstico Inteligente com DeepSeek AI */}
+          <DeepSeekPanel
+            events={filteredEvents}
+            kpis={kpis}
+            filters={filters}
+            clientName={selectedClient?.name}
+            triggerCatalog={activeTriggerCatalog}
+            onOpenReportModal={(narrative) => {
+              setActiveAiNarrative(narrative);
+              setIsReportModalOpen(true);
+            }}
+            onOpenSettings={() => navigateTo('#/settings')}
+          />
+
           {/* Resumo Executivo com 3 Conclusões e Botões de Prompt IA */}
           <ExecutiveSummary
             insights={executiveInsights}
             onOpenTuningPrompt={() => setIsTuningPromptOpen(true)}
             onOpenExecutivePrompt={() => setIsExecutivePromptOpen(true)}
+            onOpenReportModal={() => {
+              setActiveAiNarrative(undefined);
+              setIsReportModalOpen(true);
+            }}
+            onOpenPresentationModal={() => setIsPresentationModalOpen(true)}
           />
 
           {/* Faixa de 8 Cards de KPIs incluindo MTBF e Taxa de Atuação */}
           <KPICards
             kpis={kpis}
+            comparativeMetrics={comparativeMetrics}
             onSelectHost={handleFilterHost}
             onSelectTrigger={handleFilterTrigger}
           />
@@ -440,6 +655,13 @@ export default function App() {
                   <EventsTable
                     events={filteredEvents}
                     totalRaw={rawEvents.length}
+                    triggerCatalog={activeTriggerCatalog}
+                    onValidateExpression={(expr, triggerName, hostName) =>
+                      handleOpenValidator(expr, '', triggerName, hostName)
+                    }
+                    clientName={selectedClient?.name}
+                    companyName={company?.name}
+                    activeFilters={filters}
                   />
                 </>
               )}
@@ -503,6 +725,42 @@ export default function App() {
         iconType="executive"
         filteredCount={filteredEvents.length}
         totalCount={rawEvents.length}
+      />
+
+      {/* Modal de Geração de Relatório Técnico em PDF com White-label e Histórico */}
+      <ReportModal
+        isOpen={isReportModalOpen}
+        onClose={() => setIsReportModalOpen(false)}
+        events={filteredEvents}
+        kpis={kpis}
+        activeFilters={filters}
+        filename={activeFileName}
+        initialAiNarrative={activeAiNarrative}
+        defaultClientName={selectedClient?.name}
+        triggerCatalog={activeTriggerCatalog}
+        onValidateExpression={(p, r, t, h) => handleOpenValidator(p, r, t, h)}
+      />
+
+      {/* Modal de Exportação de Apresentação em PowerPoint (*.pptx) Widescreen 16:9 */}
+      <PresentationModal
+        isOpen={isPresentationModalOpen}
+        onClose={() => setIsPresentationModalOpen(false)}
+        events={filteredEvents}
+        kpis={kpis}
+        activeFilters={filters}
+        defaultClientName={selectedClient?.name}
+        initialAiNarrative={activeAiNarrative}
+        companyName={company?.name}
+      />
+
+      {/* Modal Validador de Sintaxe Zabbix 7.0 & Histerese Anti-flapping (Fase 3) */}
+      <ZabbixSyntaxValidatorModal
+        isOpen={isValidatorModalOpen}
+        onClose={() => setIsValidatorModalOpen(false)}
+        initialProblemExpression={validatorProblemExpr}
+        initialRecoveryExpression={validatorRecoveryExpr}
+        triggerName={validatorTriggerName}
+        hostName={validatorHostName}
       />
     </div>
   );

@@ -1,6 +1,6 @@
 {
-  "summary":  "Plano de implementação para alinhar estritamente os prompts de IA gerados com os filtros atualmente selecionados pelo usuário, incluindo bloco detalhado de escopo no topo e adaptação dinâmica das diretrizes e instruções da IA de acordo com os filtros de host, severidade, período, status, duração e tags.",
-  "updatedAt":  "2026-10-20T21:26:30.443261701Z",
-  "requestFeedback":  true,
-  "userFacing":  true
+  "summary": "Plano de implementação revisado: base de horas totais disponíveis calculada rigorosamente pela quantidade de dias do mês/período selecionado (31 dias = 744h, 30 dias = 720h, 28/29 dias ou intervalo de datas personalizado), consolidando a Disponibilidade Média Multi-Host e card dedicado.",
+  "updatedAt": "2026-11-03T12:19:56.448305259Z",
+  "requestFeedback": true,
+  "userFacing": true
 }

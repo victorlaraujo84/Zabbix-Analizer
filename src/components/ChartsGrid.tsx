@@ -3,6 +3,7 @@ import ChartJS from 'chart.js/auto';
 import { ZabbixEvent, TimelineBucket, ChartItemConfig } from '../types/zabbix';
 import { SEVERITY_COLORS, SEVERITY_ORDER } from '../utils/analytics';
 import { detectTimelineAnomalies } from '../utils/trends';
+import { formatDuration } from '../utils/parser';
 import { Download, Sliders, EyeOff, Eye, ArrowUp, ArrowDown, AlertTriangle } from 'lucide-react';
 
 interface ChartsGridProps {
@@ -47,11 +48,12 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
   };
 
   // 1. Dados: Linha do Tempo (Timeline Empilhada + Detecção de Anomalias Estatísticas > 2σ)
-  const { timelineData, anomalyStats } = useMemo(() => {
+  const { timelineData, anomalyStats, timelineBucketTotals } = useMemo(() => {
     if (events.length === 0) {
       return {
         timelineData: { labels: [], datasets: [] },
         anomalyStats: { anomalies: [], mean: 0, stdDev: 0, thresholds: [], movingAvg: [] },
+        timelineBucketTotals: [],
       };
     }
 
@@ -64,6 +66,7 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
       return {
         timelineData: { labels: [], datasets: [] },
         anomalyStats: { anomalies: [], mean: 0, stdDev: 0, thresholds: [], movingAvg: [] },
+        timelineBucketTotals: [],
       };
     }
 
@@ -157,25 +160,42 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
     return {
       timelineData: { labels, datasets },
       anomalyStats: anomaliesResult,
+      timelineBucketTotals: bucketTotals,
     };
   }, [events, timelineBucket]);
 
   // 2. Dados: Distribuição por Severidade
-  const severityDistributionData = useMemo(() => {
+  const { severityDistributionData, severityCounts, severityAvgDurations } = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const sev of SEVERITY_ORDER) counts[sev] = 0;
-    for (const e of events) counts[e.severidade] = (counts[e.severidade] || 0) + 1;
+    const durSums: Record<string, number> = {};
+    for (const sev of SEVERITY_ORDER) {
+      counts[sev] = 0;
+      durSums[sev] = 0;
+    }
+    for (const e of events) {
+      counts[e.severidade] = (counts[e.severidade] || 0) + 1;
+      durSums[e.severidade] = (durSums[e.severidade] || 0) + e.duracaoSegundos;
+    }
+
+    const avgDurations: Record<string, number> = {};
+    for (const sev of SEVERITY_ORDER) {
+      avgDurations[sev] = counts[sev] > 0 ? Math.round(durSums[sev] / counts[sev]) : 0;
+    }
 
     return {
-      labels: SEVERITY_ORDER,
-      datasets: [
-        {
-          data: SEVERITY_ORDER.map((s) => counts[s] || 0),
-          backgroundColor: SEVERITY_ORDER.map((s) => SEVERITY_COLORS[s]),
-          borderWidth: 2,
-          borderColor: theme === 'dark' ? '#0f172a' : '#ffffff',
-        },
-      ],
+      severityCounts: counts,
+      severityAvgDurations: avgDurations,
+      severityDistributionData: {
+        labels: SEVERITY_ORDER,
+        datasets: [
+          {
+            data: SEVERITY_ORDER.map((s) => counts[s] || 0),
+            backgroundColor: SEVERITY_ORDER.map((s) => SEVERITY_COLORS[s]),
+            borderWidth: 2,
+            borderColor: theme === 'dark' ? '#0f172a' : '#ffffff',
+          },
+        ],
+      },
     };
   }, [events, theme]);
 
@@ -202,24 +222,37 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
   }, [events]);
 
   // 4. Dados: Top 10 Triggers
-  const topTriggersData = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const e of events) counts.set(e.incidente, (counts.get(e.incidente) || 0) + 1);
+  const { topTriggersData, topTriggersMeta } = useMemo(() => {
+    const map = new Map<string, { count: number; totalDur: number; sev: string }>();
+    for (const e of events) {
+      const item = map.get(e.incidente) || { count: 0, totalDur: 0, sev: e.severidade };
+      item.count++;
+      item.totalDur += e.duracaoSegundos;
+      map.set(e.incidente, item);
+    }
 
-    const sorted = Array.from(counts.entries())
-      .sort((a, b) => b[1] - a[1])
+    const sorted = Array.from(map.entries())
+      .sort((a, b) => b[1].count - a[1].count)
       .slice(0, 10);
 
+    const fullNames = sorted.map((s) => s[0]);
+    const counts = sorted.map((s) => s[1].count);
+    const avgDurs = sorted.map((s) => Math.round(s[1].totalDur / s[1].count));
+    const sevs = sorted.map((s) => s[1].sev);
+
     return {
-      labels: sorted.map((s) => s[0]),
-      datasets: [
-        {
-          label: 'Ocorrências',
-          data: sorted.map((s) => s[1]),
-          backgroundColor: '#f59e0b',
-          borderRadius: 4,
-        },
-      ],
+      topTriggersMeta: { fullNames, counts, avgDurs, sevs },
+      topTriggersData: {
+        labels: fullNames,
+        datasets: [
+          {
+            label: 'Ocorrências',
+            data: counts,
+            backgroundColor: '#f59e0b',
+            borderRadius: 4,
+          },
+        ],
+      },
     };
   }, [events]);
 
@@ -246,7 +279,7 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
   }, [events, theme]);
 
   // 6. Dados: Duração Média por Severidade
-  const durationBySeverityData = useMemo(() => {
+  const { durationBySeverityData, durationMeta } = useMemo(() => {
     const sums: Record<string, number> = {};
     const counts: Record<string, number> = {};
     for (const s of SEVERITY_ORDER) {
@@ -261,22 +294,28 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
     const avgMinutes = SEVERITY_ORDER.map((s) =>
       counts[s] > 0 ? Math.round(sums[s] / counts[s] / 60) : 0
     );
+    const avgSeconds = SEVERITY_ORDER.map((s) =>
+      counts[s] > 0 ? Math.round(sums[s] / counts[s]) : 0
+    );
 
     return {
-      labels: SEVERITY_ORDER,
-      datasets: [
-        {
-          label: 'Minutos Médios',
-          data: avgMinutes,
-          backgroundColor: SEVERITY_ORDER.map((s) => SEVERITY_COLORS[s]),
-          borderRadius: 4,
-        },
-      ],
+      durationMeta: { avgMinutes, avgSeconds, counts },
+      durationBySeverityData: {
+        labels: SEVERITY_ORDER,
+        datasets: [
+          {
+            label: 'Minutos Médios',
+            data: avgMinutes,
+            backgroundColor: SEVERITY_ORDER.map((s) => SEVERITY_COLORS[s]),
+            borderRadius: 4,
+          },
+        ],
+      },
     };
   }, [events]);
 
   // 7. Dados: Eventos por Hora do Dia (0-23h)
-  const eventsByHourData = useMemo(() => {
+  const { eventsByHourData, hourlyMax } = useMemo(() => {
     const hours = Array.from({ length: 24 }, (_, i) => i);
     const counts = new Array(24).fill(0);
 
@@ -287,16 +326,21 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
       }
     }
 
+    const maxVal = Math.max(...counts, 0);
+
     return {
-      labels: hours.map((h) => `${String(h).padStart(2, '0')}h`),
-      datasets: [
-        {
-          label: 'Eventos',
-          data: counts,
-          backgroundColor: '#6366f1',
-          borderRadius: 3,
-        },
-      ],
+      hourlyMax: maxVal,
+      eventsByHourData: {
+        labels: hours.map((h) => `${String(h).padStart(2, '0')}h`),
+        datasets: [
+          {
+            label: 'Eventos',
+            data: counts,
+            backgroundColor: '#6366f1',
+            borderRadius: 3,
+          },
+        ],
+      },
     };
   }, [events]);
 
@@ -352,7 +396,7 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
 
     destroyAll();
 
-    // Helper options
+    // Helper options de escalas
     const commonScales = {
       x: {
         ticks: { color: textColor, font: { size: 10 } },
@@ -362,6 +406,22 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
         ticks: { color: textColor, font: { size: 10 } },
         grid: { color: gridColor },
       },
+    };
+
+    // Estilo translúcido elegante e unificado para os tooltips dos 8 gráficos
+    const commonTooltipTheme = {
+      backgroundColor: theme === 'dark' ? 'rgba(15, 23, 42, 0.95)' : 'rgba(30, 41, 59, 0.95)',
+      titleColor: '#ffffff',
+      bodyColor: '#f1f5f9',
+      footerColor: '#38bdf8',
+      borderColor: theme === 'dark' ? 'rgba(255, 255, 255, 0.15)' : 'rgba(148, 163, 184, 0.35)',
+      borderWidth: 1,
+      padding: 10,
+      cornerRadius: 8,
+      titleFont: { size: 12, weight: 'bold' as const, family: "'Plus Jakarta Sans', sans-serif" },
+      bodyFont: { size: 11, family: "'Plus Jakarta Sans', sans-serif" },
+      footerFont: { size: 10, weight: 'bold' as const, family: "'JetBrains Mono', monospace" },
+      boxPadding: 4,
     };
 
     // 1. Timeline Chart (Barras empilhadas + Linha de Média Móvel + Linha de Limiar de Anomalia)
@@ -378,12 +438,24 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
               labels: { color: textColor, font: { size: 11 }, boxWidth: 12 },
             },
             tooltip: {
+              ...commonTooltipTheme,
               callbacks: {
+                title: (items) => `Intervalo: ${items[0]?.label || ''}`,
+                label: (item) => {
+                  if (item.datasetIndex >= 5) {
+                    return `${item.dataset.label}: ${item.parsed.y} eventos`;
+                  }
+                  const sev = item.dataset.label || '';
+                  const count = item.parsed.y || 0;
+                  const idx = item.dataIndex;
+                  const bTotal = timelineBucketTotals[idx] || 1;
+                  const pct = Math.round((count / bTotal) * 100);
+                  return `${sev}: ${count} incidentes (${pct}% do período)`;
+                },
                 footer: (items) => {
                   const idx = items[0]?.dataIndex;
                   if (idx === undefined) return '';
 
-                  // Soma apenas datasets de severidade (barras)
                   const total = items.reduce((acc, curr) => {
                     return curr.datasetIndex < 5 ? acc + (curr.parsed.y || 0) : acc;
                   }, 0);
@@ -392,9 +464,9 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
                   const ma = anomalyStats.movingAvg[idx] || 0;
 
                   if (total > th && total >= 2) {
-                    return `Total: ${total} eventos\n🚨 ANOMALIA ESTATÍSTICA: Volume excede a média móvel (${ma}) por mais de 2σ (Limiar: ${th})`;
+                    return `Total no período: ${total} eventos\n🚨 ANOMALIA ESTATÍSTICA: Volume excede a média móvel (${ma}) por mais de 2σ (Limiar: ${th})`;
                   }
-                  return `Total: ${total} eventos | Média: ${ma} | Limiar (+2σ): ${th}`;
+                  return `Total no período: ${total} eventos | Média Móvel: ${ma} | Limiar (+2σ): ${th}`;
                 },
               },
             },
@@ -416,6 +488,29 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
             legend: {
               position: 'right',
               labels: { color: textColor, font: { size: 11 }, boxWidth: 12 },
+            },
+            tooltip: {
+              ...commonTooltipTheme,
+              callbacks: {
+                title: (items) => `Severidade: ${items[0]?.label || ''}`,
+                label: (item) => {
+                  const sev = item.label;
+                  const count = item.parsed as number;
+                  const total = events.length || 1;
+                  const pct = ((count / total) * 100).toFixed(1);
+                  return `Volume: ${count} incidentes (${pct}% do total filtrado)`;
+                },
+                afterLabel: (item) => {
+                  const sev = item.label;
+                  const avgSec = severityAvgDurations[sev] || 0;
+                  return `Duração Média: ${formatDuration(avgSec)}`;
+                },
+                footer: (items) => {
+                  const sev = items[0]?.label;
+                  if (sev === 'Desastre' || sev === 'Alta') return '⚠️ Criticidade Máxima com impacto direto no SLA';
+                  return 'Monitoramento operacional preventivo';
+                },
+              },
             },
           },
           cutout: '65%',
@@ -442,8 +537,16 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
           plugins: {
             legend: { display: false },
             tooltip: {
+              ...commonTooltipTheme,
               callbacks: {
-                afterLabel: () => 'Clique na barra para filtrar por este host',
+                title: (items) => `Servidor / Host: ${items[0]?.label || ''}`,
+                label: (item) => {
+                  const count = item.parsed.x as number;
+                  const total = events.length || 1;
+                  const pct = ((count / total) * 100).toFixed(1);
+                  return `Alarmes Disparados: ${count} incidentes (${pct}% do escopo)`;
+                },
+                afterLabel: () => '💡 Clique na barra para filtrar incidentes deste host',
               },
             },
           },
@@ -464,11 +567,25 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
           plugins: {
             legend: { display: false },
             tooltip: {
+              ...commonTooltipTheme,
               callbacks: {
                 title: (items) => {
                   const idx = items[0]?.dataIndex;
-                  return topTriggersData.labels[idx] || '';
+                  return topTriggersMeta.fullNames[idx] || items[0]?.label || '';
                 },
+                label: (item) => {
+                  const count = item.parsed.x as number;
+                  const total = events.length || 1;
+                  const pct = ((count / total) * 100).toFixed(1);
+                  return `Ocorrências: ${count} vezes (${pct}% de todos os alarmes)`;
+                },
+                afterLabel: (item) => {
+                  const idx = item.dataIndex;
+                  const avgSec = topTriggersMeta.avgDurs[idx] || 0;
+                  const sev = topTriggersMeta.sevs[idx] || '';
+                  return `Duração Média: ${formatDuration(avgSec)} | Severidade: ${sev}`;
+                },
+                footer: () => '💡 Trigger com alto impacto de ruído / flapping',
               },
             },
           },
@@ -503,6 +620,24 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
               position: 'right',
               labels: { color: textColor, font: { size: 11 }, boxWidth: 12 },
             },
+            tooltip: {
+              ...commonTooltipTheme,
+              callbacks: {
+                title: (items) => `Status: ${items[0]?.label || ''}`,
+                label: (item) => {
+                  const label = item.label;
+                  const count = item.parsed as number;
+                  const total = events.length || 1;
+                  const pct = ((count / total) * 100).toFixed(1);
+                  return `Volume: ${count} incidentes (${pct}% do total)`;
+                },
+                afterLabel: (item) => {
+                  return item.label === 'RESOLVIDO'
+                    ? '✅ Alarmes encerrados e normalizados'
+                    : '🚨 Backlog de incidentes ativos aguardando solução';
+                },
+              },
+            },
           },
         },
       });
@@ -519,8 +654,25 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
           plugins: {
             legend: { display: false },
             tooltip: {
+              ...commonTooltipTheme,
               callbacks: {
-                label: (ctx) => `${ctx.parsed.y} minutos médios`,
+                title: (items) => `Criticidade: ${items[0]?.label || ''}`,
+                label: (item) => {
+                  const sev = item.label;
+                  const avgMin = item.parsed.y as number;
+                  const avgSec = durationMeta.avgSeconds[SEVERITY_ORDER.indexOf(sev as any)] || 0;
+                  return `Tempo Médio: ${formatDuration(avgSec)} (${avgMin} minutos)`;
+                },
+                afterLabel: (item) => {
+                  const sev = item.label;
+                  const count = durationMeta.counts[sev] || 0;
+                  return `Amostra: ${count} incidentes nesta criticidade`;
+                },
+                footer: (items) => {
+                  const sev = items[0]?.label;
+                  if (sev === 'Desastre' || sev === 'Alta') return 'Foco prioritário para redução do MTTR';
+                  return 'Tempo médio de restabelecimento do serviço';
+                },
               },
             },
           },
@@ -545,6 +697,35 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
           maintainAspectRatio: false,
           plugins: {
             legend: { display: false },
+            tooltip: {
+              ...commonTooltipTheme,
+              callbacks: {
+                title: (items) => {
+                  const lbl = items[0]?.label || '0h';
+                  const hourNum = parseInt(lbl.replace('h', ''), 10);
+                  const nextHour = (hourNum + 1) % 24;
+                  return `Janela: ${lbl} às ${String(nextHour).padStart(2, '0')}:00`;
+                },
+                label: (item) => {
+                  const count = item.parsed.y as number;
+                  const total = events.length || 1;
+                  const pct = ((count / total) * 100).toFixed(1);
+                  return `Incidentes Registrados: ${count} (${pct}% do total)`;
+                },
+                afterLabel: (item) => {
+                  const count = item.parsed.y as number;
+                  const avg = Number((events.length / 24).toFixed(1));
+                  const diff = avg > 0 ? Math.round(((count - avg) / avg) * 100) : 0;
+                  const sign = diff > 0 ? '+' : '';
+                  return `Média Horária: ${avg} eventos (${sign}${diff}% vs média)`;
+                },
+                footer: (items) => {
+                  const count = items[0]?.parsed.y as number;
+                  if (count === hourlyMax && count > 0) return '🔥 PICO MÁXIMO DE ALARMES DO DIA';
+                  return '';
+                },
+              },
+            },
           },
           scales: commonScales,
         },
@@ -561,6 +742,18 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
           maintainAspectRatio: false,
           plugins: {
             legend: { display: false },
+            tooltip: {
+              ...commonTooltipTheme,
+              callbacks: {
+                title: (items) => `Data/Hora: ${items[0]?.label || ''}`,
+                label: (item) => {
+                  const count = item.parsed.y as number;
+                  return `Backlog Ativo: ${count} incidentes pendentes`;
+                },
+                afterLabel: () => 'Acompanhamento de volume de fila em tempo real',
+                footer: () => 'Acúmulo de incidentes não normalizados',
+              },
+            },
           },
           scales: commonScales,
         },
@@ -572,14 +765,22 @@ export const ChartsGrid: React.FC<ChartsGridProps> = ({
     };
   }, [
     timelineData,
+    timelineBucketTotals,
+    anomalyStats,
     severityDistributionData,
+    severityCounts,
+    severityAvgDurations,
     topHostsData,
     topTriggersData,
+    topTriggersMeta,
     statusDistributionData,
     durationBySeverityData,
+    durationMeta,
     eventsByHourData,
+    hourlyMax,
     openIncidentsEvolutionData,
     theme,
+    events.length,
   ]);
 
   // Reordenar configs de gráfico

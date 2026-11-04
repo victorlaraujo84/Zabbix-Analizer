@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
-import { ZabbixEvent } from '../types/zabbix';
-import { SEVERITY_COLORS } from '../utils/analytics';
+import { ZabbixEvent, ClientTriggerCatalog, ZabbixTriggerCatalogItem } from '../types/zabbix';
+import { SEVERITY_COLORS, findTriggerExpression } from '../utils/analytics';
 import { exportToCSV } from '../utils/analytics';
 import { formatDateTimeBR } from '../utils/parser';
 import {
@@ -14,11 +14,24 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Tag,
+  Code2,
+  Copy,
+  CheckCheck,
+  X,
+  Sparkles,
+  ShieldCheck,
+  FileDown,
 } from 'lucide-react';
+import { exportEventsTableToPDF } from '../utils/tablePdfExport';
 
 interface EventsTableProps {
   events: ZabbixEvent[];
   totalRaw: number;
+  triggerCatalog?: ClientTriggerCatalog | null;
+  onValidateExpression?: (expr: string, triggerName?: string, hostName?: string) => void;
+  clientName?: string;
+  companyName?: string;
+  activeFilters?: any;
 }
 
 type SortField =
@@ -31,13 +44,52 @@ type SortField =
   | 'duracaoSegundos'
   | 'reconhecido';
 
-export const EventsTable: React.FC<EventsTableProps> = ({ events, totalRaw }) => {
+export const EventsTable: React.FC<EventsTableProps> = ({
+  events,
+  totalRaw,
+  triggerCatalog,
+  onValidateExpression,
+  clientName,
+  companyName,
+  activeFilters,
+}) => {
   const [tableSearch, setTableSearch] = useState('');
   const [sortField, setSortField] = useState<SortField>('hora');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [pageSize, setPageSize] = useState<number>(50);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
+  const [activeExprModal, setActiveExprModal] = useState<ZabbixTriggerCatalogItem | null>(null);
+  const [copiedExprId, setCopiedExprId] = useState<string | null>(null);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [exportFeedback, setExportFeedback] = useState<string | null>(null);
+
+  const handleCopyText = (id: string, text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedExprId(id);
+    setTimeout(() => setCopiedExprId(null), 2000);
+  };
+
+  const handleExportPDF = () => {
+    if (processedEvents.length === 0) return;
+    setIsExportingPdf(true);
+    setExportFeedback(null);
+    try {
+      exportEventsTableToPDF({
+        events: processedEvents,
+        clientName: clientName || 'Cliente Corporativo',
+        companyName: companyName || 'SNOC Observability Suite',
+        activeFilters,
+        totalRawEvents: totalRaw,
+      });
+      setExportFeedback(`Relatório em PDF com ${processedEvents.length} eventos exportado com sucesso!`);
+      setTimeout(() => setExportFeedback(null), 3500);
+    } catch (err: any) {
+      alert(`Erro ao gerar PDF da tabela: ${err.message}`);
+    } finally {
+      setIsExportingPdf(false);
+    }
+  };
 
   // Ordenação e busca local adicional se digitado na tabela
   const processedEvents = useMemo(() => {
@@ -154,12 +206,49 @@ export const EventsTable: React.FC<EventsTableProps> = ({ events, totalRaw }) =>
           <button
             onClick={() => exportToCSV(processedEvents)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors cursor-pointer"
+            title="Exportar dados filtrados em formato CSV"
           >
             <Download className="w-3.5 h-3.5 text-slate-500" />
             <span>Exportar CSV</span>
           </button>
+
+          {/* Exportar PDF Formatado (A4 Paisagem) */}
+          <button
+            onClick={handleExportPDF}
+            disabled={isExportingPdf || processedEvents.length === 0}
+            title="Exportar todos os eventos filtrados em PDF formatado (A4 Paisagem)"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-red-900 dark:text-red-100 bg-red-100 hover:bg-red-200 dark:bg-red-950/60 dark:hover:bg-red-900/60 border border-red-300 dark:border-red-800 rounded-lg shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+          >
+            {isExportingPdf ? (
+              <>
+                <div className="w-3.5 h-3.5 border-2 border-red-600 dark:border-red-400 border-t-transparent rounded-full animate-spin" />
+                <span>Gerando PDF...</span>
+              </>
+            ) : (
+              <>
+                <FileDown className="w-3.5 h-3.5 text-red-600 dark:text-red-400" />
+                <span>Exportar PDF ({processedEvents.length})</span>
+              </>
+            )}
+          </button>
         </div>
       </div>
+
+      {/* Banner de Feedback de Exportação */}
+      {exportFeedback && (
+        <div className="mb-3 p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 text-xs font-semibold flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <CheckCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <span>{exportFeedback}</span>
+          </div>
+          <button
+            onClick={() => setExportFeedback(null)}
+            className="text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline cursor-pointer"
+          >
+            Fechar
+          </button>
+        </div>
+      )}
 
       {/* Tabela com rolagem horizontal */}
       <div className="overflow-x-auto -mx-5 px-5">
@@ -222,6 +311,7 @@ export const EventsTable: React.FC<EventsTableProps> = ({ events, totalRaw }) =>
               const sevColor = SEVERITY_COLORS[evt.severidade] || '#757575';
               const isResolved = evt.status === 'RESOLVIDO';
               const isExpanded = expandedRowId === evt.id;
+              const exprItem = findTriggerExpression(evt.host, evt.incidente, triggerCatalog);
 
               return (
                 <React.Fragment key={evt.id}>
@@ -266,12 +356,42 @@ export const EventsTable: React.FC<EventsTableProps> = ({ events, totalRaw }) =>
 
                     {/* Host */}
                     <td className="py-2 px-3 font-mono text-slate-800 dark:text-slate-200 font-medium whitespace-nowrap">
-                      {evt.host}
+                      {typeof evt.host === 'object' && evt.host !== null ? ((evt.host as any).host || String(evt.host)) : String(evt.host || '')}
                     </td>
 
                     {/* Incidente */}
-                    <td className="py-2 px-3 text-slate-700 dark:text-slate-300 max-w-sm truncate" title={evt.incidente}>
-                      {evt.incidente}
+                    <td className="py-2 px-3 text-slate-700 dark:text-slate-300 max-w-sm" title={evt.incidente}>
+                      <div className="flex items-center gap-1.5">
+                        <span className="truncate">{evt.incidente}</span>
+                        {evt.expressao ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setActiveExprModal({
+                                id: evt.id,
+                                host: evt.host,
+                                name: evt.incidente,
+                                expression: evt.expressao!,
+                              })
+                            }
+                            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-50 dark:bg-amber-950/70 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900 cursor-pointer shrink-0 transition-colors"
+                            title={`Expressão da Trigger: ${evt.expressao}`}
+                          >
+                            <Code2 className="w-3 h-3" />
+                            <span>Expressão</span>
+                          </button>
+                        ) : exprItem ? (
+                          <button
+                            type="button"
+                            onClick={() => setActiveExprModal(exprItem)}
+                            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-blue-50 dark:bg-blue-950/70 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800 hover:bg-blue-100 dark:hover:bg-blue-900 cursor-pointer shrink-0 transition-colors"
+                            title="Ver expressão cadastrada na planilha do Zabbix"
+                          >
+                            <Code2 className="w-3 h-3" />
+                            <span>fx</span>
+                          </button>
+                        ) : null}
+                      </div>
                     </td>
 
                     {/* Duração */}
@@ -335,6 +455,45 @@ export const EventsTable: React.FC<EventsTableProps> = ({ events, totalRaw }) =>
                               )}
                             </div>
                           </div>
+
+                          {/* Bloco de Expressão Zabbix quando disponível */}
+                          {exprItem && (
+                            <div className="col-span-full pt-2 mt-2 border-t border-slate-200 dark:border-slate-700/80">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5 text-xs">
+                                  <Code2 className="w-3.5 h-3.5 text-blue-500" />
+                                  <span>Expressão Zabbix (Catálogo do Cliente):</span>
+                                </span>
+                                <div className="flex items-center gap-2">
+                                  {exprItem.parsedThreshold && (
+                                    <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
+                                      {exprItem.parsedThreshold}
+                                    </span>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopyText(exprItem.id, exprItem.expression)}
+                                    className="p-1 text-[11px] text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1 cursor-pointer"
+                                  >
+                                    {copiedExprId === exprItem.id ? (
+                                      <>
+                                        <CheckCheck className="w-3 h-3 text-emerald-500" />
+                                        <span className="text-emerald-500">Copiado</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Copy className="w-3 h-3" />
+                                        <span>Copiar</span>
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                              <pre className="p-2.5 rounded-lg bg-slate-900 text-slate-200 font-mono text-[11px] overflow-x-auto whitespace-pre-wrap break-all border border-slate-800 leading-relaxed">
+                                {exprItem.expression}
+                              </pre>
+                            </div>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -415,6 +574,121 @@ export const EventsTable: React.FC<EventsTableProps> = ({ events, totalRaw }) =>
           </button>
         </div>
       </div>
+
+      {/* Modal Rápido de Expressão Zabbix */}
+      {activeExprModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="relative w-full max-w-2xl bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 p-6">
+            <button
+              type="button"
+              onClick={() => setActiveExprModal(null)}
+              className="absolute top-4 right-4 p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-2 mb-2">
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300">
+                {activeExprModal.host}
+              </span>
+              <span className="font-semibold text-xs text-blue-600 dark:text-blue-400 flex items-center gap-1">
+                <Code2 className="w-3.5 h-3.5" />
+                Expressão Zabbix do Catálogo
+              </span>
+            </div>
+
+            <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-3">
+              {activeExprModal.name}
+            </h3>
+
+            <div className="relative group mb-4">
+              <pre className="p-3 rounded-xl bg-slate-900 text-slate-200 font-mono text-xs overflow-x-auto whitespace-pre-wrap break-all border border-slate-800 leading-relaxed">
+                {activeExprModal.expression}
+              </pre>
+              <button
+                type="button"
+                onClick={() => handleCopyText(activeExprModal.id, activeExprModal.expression)}
+                className="absolute top-2.5 right-2.5 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[10px] font-medium flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
+              >
+                {copiedExprId === activeExprModal.id ? (
+                  <>
+                    <CheckCheck className="w-3 h-3 text-emerald-400" />
+                    <span className="text-emerald-400">Copiado</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3 h-3" />
+                    <span>Copiar Expressão</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-2">
+                {activeExprModal.parsedFunction && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800">
+                    Função: {activeExprModal.parsedFunction}
+                  </span>
+                )}
+                {activeExprModal.parsedThreshold && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
+                    Limiar: {activeExprModal.parsedThreshold}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {onValidateExpression && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onValidateExpression(activeExprModal.expression, activeExprModal.name, activeExprModal.host);
+                      setActiveExprModal(null);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    <span>Auditar no Validador</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeExprModal) {
+                      try {
+                        sessionStorage.setItem(
+                          'zabbix_factory_target',
+                          JSON.stringify({
+                            host: activeExprModal.host,
+                            trigger: activeExprModal.name,
+                            problemExpr: activeExprModal.expression || '',
+                            recoveryExpr: '',
+                          })
+                        );
+                      } catch {
+                        // ignora
+                      }
+                    }
+                    setActiveExprModal(null);
+                    window.location.hash = '#/trigger-factory';
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Otimizar na Fábrica</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveExprModal(null)}
+                  className="px-4 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-semibold hover:bg-slate-300 dark:hover:bg-slate-700 cursor-pointer"
+                >
+                  Fechar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

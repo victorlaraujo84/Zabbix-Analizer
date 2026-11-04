@@ -106,17 +106,17 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
             <div className="flex flex-col items-center justify-center py-4">
               <Loader2 className="w-8 h-8 text-red-600 animate-spin mb-3" />
               <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
-                Processando relatório e normalizando 12 colunas...
+                Processando planilha e mapeando até 15 colunas com Expressões Zabbix...
               </p>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center py-2">
               <Upload className="w-8 h-8 text-slate-400 dark:text-slate-500 mb-3" />
               <p className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-                Arraste o arquivo aqui ou clique para selecionar
+                Arraste a planilha Zabbix aqui ou clique para selecionar
               </p>
-              <p className="text-xs text-slate-400 dark:text-slate-500">
-                Suporta relatórios padrão Zabbix com colunas de Severidade, Hora, Status, Host e Duração ISO 8601
+              <p className="text-xs text-slate-400 dark:text-slate-500 max-w-md mx-auto">
+                Suporta planilhas de 12 a 15 colunas do Zabbix com mapeamento automático da coluna Expressão, Severidade, Host, Duração e Tags
               </p>
             </div>
           )}

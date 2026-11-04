@@ -347,11 +347,13 @@ export const TrendsView: React.FC<TrendsViewProps> = ({ comparison }) => {
 
           {comparison.degradedHosts.length > 0 ? (
             <div className="divide-y divide-slate-100 dark:divide-slate-800">
-              {comparison.degradedHosts.map((h) => (
-                <div key={h.host} className="py-2.5 flex items-center justify-between text-xs">
+              {comparison.degradedHosts.map((h) => {
+                const hostStr = typeof h.host === 'object' && h.host !== null ? ((h.host as any).host || String(h.host)) : String(h.host || '');
+                return (
+                <div key={hostStr} className="py-2.5 flex items-center justify-between text-xs">
                   <div className="min-w-0 pr-3">
                     <span className="font-mono font-medium text-slate-800 dark:text-slate-200 block truncate">
-                      {h.host}
+                      {hostStr}
                     </span>
                     <span className="text-[11px] text-slate-400 font-mono tabular-nums">
                       {h.previousCount} eventos ➔ {h.currentCount} eventos
@@ -366,7 +368,8 @@ export const TrendsView: React.FC<TrendsViewProps> = ({ comparison }) => {
                     </span>
                   </div>
                 </div>
-              ))}
+              );
+            })}
             </div>
           ) : (
             <div className="py-8 text-center text-xs text-slate-400">

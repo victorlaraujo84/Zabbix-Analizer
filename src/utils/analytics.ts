@@ -1,4 +1,4 @@
-import { ZabbixEvent, ZabbixFilters, ZabbixKPIs } from '../types/zabbix';
+import { ZabbixEvent, ZabbixFilters, ZabbixKPIs, ZabbixTriggerCatalogItem, ClientTriggerCatalog, ComparativeMetricsResult } from '../types/zabbix';
 import { formatDuration } from './parser';
 
 export const SEVERITY_COLORS: Record<string, string> = {
@@ -36,13 +36,23 @@ export function filterEvents(events: ZabbixEvent[], filters: ZabbixFilters): Zab
     }
 
     // 3. Filtro de Host
-    if (filters.hosts.length > 0 && !filters.hosts.includes(evt.host)) {
-      return false;
+    if (filters.hosts && filters.hosts.length > 0) {
+      const safeEvtHost = typeof evt.host === 'object' && evt.host !== null ? ((evt.host as any).host || String(evt.host)) : String(evt.host || '');
+      const matchHost = filters.hosts.some((h: any) => {
+        const hStr = typeof h === 'object' && h !== null ? (h.host || String(h)) : String(h);
+        return hStr === safeEvtHost;
+      });
+      if (!matchHost) return false;
     }
 
     // 4. Filtro de Trigger (Incidente)
-    if (filters.triggers.length > 0 && !filters.triggers.includes(evt.incidente)) {
-      return false;
+    if (filters.triggers && filters.triggers.length > 0) {
+      const safeEvtTrig = typeof evt.incidente === 'object' && evt.incidente !== null ? ((evt.incidente as any).trigger || (evt.incidente as any).name || String(evt.incidente)) : String(evt.incidente || '');
+      const matchTrig = filters.triggers.some((t: any) => {
+        const tStr = typeof t === 'object' && t !== null ? (t.trigger || t.name || String(t)) : String(t);
+        return tStr === safeEvtTrig;
+      });
+      if (!matchTrig) return false;
     }
 
     // 5. Filtro de Status
@@ -102,15 +112,256 @@ export function filterEvents(events: ZabbixEvent[], filters: ZabbixFilters): Zab
       }
     }
 
+    // 11. Filtro por Função Técnica Zabbix (Fase 3: nodata, last, diff, avg, etc.)
+    if (filters.zabbixFunction && filters.zabbixFunction !== 'todas') {
+      const fn = filters.zabbixFunction.toLowerCase();
+      const expr = (evt.expressao || '').toLowerCase();
+      const inc = evt.incidente.toLowerCase();
+      // Verifica presença da função na expressão técnica ou no nome do incidente
+      const hasFunctionInExpr = expr.includes(fn + '(') || expr.includes('.' + fn + '(');
+      const hasFunctionInInc = inc.includes(fn + '(') || (fn === 'nodata' && (inc.includes('nodata') || inc.includes('sem dados') || inc.includes('comunicação') || inc.includes('inaccessible') || inc.includes('unreachable') || inc.includes('down')));
+      if (!hasFunctionInExpr && !hasFunctionInInc) {
+        return false;
+      }
+    }
+
+    // 12. Filtro por Busca na Expressão Zabbix (Fase 3)
+    if (filters.expressionQuery && filters.expressionQuery.trim()) {
+      const eq = filters.expressionQuery.trim().toLowerCase();
+      const expr = (evt.expressao || '').toLowerCase();
+      const inc = evt.incidente.toLowerCase();
+      if (!expr.includes(eq) && !inc.includes(eq)) {
+        return false;
+      }
+    }
+
     return true;
   });
 }
 
 /**
- * Calcula os indicadores chave de desempenho (KPIs) com MTTR, MTBF e Taxa de Atuação.
+ * Detecta se o evento corresponde a uma janela de manutenção programada ou preventiva.
+ * Não entra como falha e sua duração deve ser deduzida do Uptime Planejado se intencional.
  */
-export function computeKPIs(events: ZabbixEvent[]): ZabbixKPIs {
+export function isPlannedMaintenanceEvent(evt: ZabbixEvent): boolean {
+  if (!evt) return false;
+  const lowerInc = (evt.incidente || '').toLowerCase();
+  const lowerActions = (evt.acoes || '').toLowerCase();
+  const lowerTags = (evt.etiquetasTexto || '').toLowerCase();
+
+  const maintenanceTerms = [
+    'manutencao',
+    'manutenção',
+    'preventiva',
+    'janela de manutencao',
+    'janela de manutenção',
+    'programada',
+    'scheduled maintenance',
+    'maintenance window',
+    'parada programada',
+  ];
+
+  if (maintenanceTerms.some((t) => lowerInc.includes(t) || lowerActions.includes(t) || lowerTags.includes(t))) {
+    return true;
+  }
+
+  if (evt.etiquetas) {
+    for (const [k, v] of Object.entries(evt.etiquetas)) {
+      const lowerK = k.toLowerCase();
+      const lowerV = String(v).toLowerCase();
+      if (
+        lowerK.includes('manut') ||
+        lowerK.includes('maint') ||
+        lowerK.includes('prevent') ||
+        lowerV.includes('manut') ||
+        lowerV.includes('maint') ||
+        lowerV.includes('prevent')
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Detecta se o evento corresponde a uma falha crítica de indisponibilidade (divisora do MTBF no NOC).
+ * Conforme critérios de NOC:
+ * 1. Severidade Desastre ou Alta/Alto.
+ * 2. Qualquer alerta que gere indisponibilidade de serviço ou link (down, unreachable, offline, timeout, etc.).
+ * 3. Exceto manutenções preventivas programadas.
+ */
+export function isCriticalOutageEvent(evt: ZabbixEvent): boolean {
+  if (!evt) return false;
+  if (isPlannedMaintenanceEvent(evt)) return false;
+
+  const sev = (evt.severidade || '').trim();
+  if (sev === 'Desastre' || sev === 'Alta' || sev === 'Alto') {
+    return true;
+  }
+
+  const lowerInc = (evt.incidente || '').toLowerCase();
+  const outageKeywords = [
+    'down',
+    'unreachable',
+    'indisponivel',
+    'indisponível',
+    'indisponibilidade',
+    'falha de link',
+    'link down',
+    'offline',
+    'sem comunicacao',
+    'sem comunicação',
+    'inaccessible',
+    'inacessivel',
+    'inacessível',
+    'timeout de conexao',
+    'timeout de conexão',
+    'interrupcao',
+    'interrupção',
+    'queda',
+    'crash',
+    'service stopped',
+    'service unavailable',
+    'host is down',
+    'porta down',
+    'falha de comunicacao',
+    'falha de comunicação',
+  ];
+
+  return outageKeywords.some((kw) => lowerInc.includes(kw));
+}
+
+/**
+ * Calcula os indicadores chave de desempenho (KPIs) com MTTR, MTBF e Taxa de Atuação.
+ * O MTBF segue os critérios rigorosos de NOC:
+ * MTBF = (Tempo Total de Operação Planejado 24x7 - Downtime Não Planejado) / Número de Falhas Críticas
+ */
+/**
+ * Retorna a quantidade exata de dias de um determinado mês (ano e mês base 0).
+ * Ex: Outubro (mês 9) -> 31 dias.
+ * Ex: Setembro (mês 8) -> 30 dias.
+ * Ex: Fevereiro 2024 -> 29 dias (bissexto), Fevereiro 2026 -> 28 dias.
+ */
+export function getDaysInMonth(year: number, monthZeroIndexed: number): number {
+  return new Date(year, monthZeroIndexed + 1, 0).getDate();
+}
+
+export interface PeriodCalendarMetrics {
+  totalDias: number;
+  totalHoras: number;
+  totalSegundos: number;
+  label: string;
+  mesReferencia: string;
+}
+
+/**
+ * Calcula rigorosamente as horas e dias totais de operação planejada 24x7.
+ * Conforme especificação:
+ * - Se o mês analisado tiver 31 dias: 24 * 31 = 744 horas (2.678.400 segundos).
+ * - Se o mês analisado tiver 30 dias: 24 * 30 = 720 horas (2.592.000 segundos).
+ * - Se for Fevereiro: 24 * 28 = 672 horas (ou 696 horas em bissexto).
+ * - Se for recorte de dias específico: quantidade de dias selecionados * 24 horas.
+ */
+export function calculatePeriodCalendarMetrics(
+  events: ZabbixEvent[] = [],
+  activeFilters?: Partial<ZabbixFilters>
+): PeriodCalendarMetrics {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const now = new Date();
+
+  const parseFilterDate = (str?: string) => {
+    if (!str || typeof str !== 'string') return null;
+    const m = str.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/);
+    if (!m) return null;
+    return new Date(
+      parseInt(m[1], 10),
+      parseInt(m[2], 10) - 1,
+      parseInt(m[3], 10),
+      m[4] ? parseInt(m[4], 10) : 0,
+      m[5] ? parseInt(m[5], 10) : 0
+    );
+  };
+
+  let startDate = parseFilterDate(activeFilters?.dateFrom);
+  let endDate = parseFilterDate(activeFilters?.dateTo);
+
+  if (!startDate || !endDate) {
+    for (const evt of events) {
+      if (evt.dataInicio) {
+        if (!startDate || evt.dataInicio < startDate) startDate = evt.dataInicio;
+        if (!endDate || evt.dataInicio > endDate) endDate = evt.dataInicio;
+      }
+    }
+  }
+
+  // Fallback se não houver datas em nenhum evento
+  if (!startDate || !endDate) {
+    const daysInCurrMonth = getDaysInMonth(now.getFullYear(), now.getMonth());
+    return {
+      totalDias: daysInCurrMonth,
+      totalHoras: daysInCurrMonth * 24,
+      totalSegundos: daysInCurrMonth * 24 * 3600,
+      label: `${daysInCurrMonth} dias (${daysInCurrMonth * 24}h)`,
+      mesReferencia: `${pad(now.getMonth() + 1)}/${now.getFullYear()}`,
+    };
+  }
+
+  const sY = startDate.getFullYear();
+  const sM = startDate.getMonth();
+  const eY = endDate.getFullYear();
+  const eM = endDate.getMonth();
+  const daysInStartMonth = getDaysInMonth(sY, sM);
+
+  // Período contido no mesmo mês e ano
+  if (sY === eY && sM === eM) {
+    const diffDays = Math.max(1, Math.round((endDate.getTime() - startDate.getTime()) / (86400 * 1000)) + 1);
+
+    // Se o usuário selecionou o mês inteiro ou os eventos cobrem o mês (27+ dias ou do dia 1 ao fim)
+    if (diffDays >= 27 || (startDate.getDate() <= 2 && endDate.getDate() >= daysInStartMonth - 1)) {
+      const dias = daysInStartMonth;
+      return {
+        totalDias: dias,
+        totalHoras: dias * 24,
+        totalSegundos: dias * 24 * 3600,
+        label: `${dias} dias (${dias * 24}h) - Mês Calendário`,
+        mesReferencia: `${pad(sM + 1)}/${sY}`,
+      };
+    }
+
+    // Recorte de dias específico dentro do mês
+    const dias = diffDays;
+    return {
+      totalDias: dias,
+      totalHoras: dias * 24,
+      totalSegundos: dias * 24 * 3600,
+      label: `${dias} dia${dias > 1 ? 's' : ''} (${dias * 24}h)`,
+      mesReferencia: `${pad(sM + 1)}/${sY}`,
+    };
+  }
+
+  // Período que abrange meses diferentes
+  const diffDays = Math.max(1, Math.round((endDate.getTime() - startDate.getTime()) / (86400 * 1000)) + 1);
+  return {
+    totalDias: diffDays,
+    totalHoras: diffDays * 24,
+    totalSegundos: diffDays * 24 * 3600,
+    label: `${diffDays} dias (${diffDays * 24}h)`,
+    mesReferencia: `${pad(sM + 1)}/${sY} a ${pad(eM + 1)}/${eY}`,
+  };
+}
+
+/**
+ * Calcula os indicadores chave de desempenho (KPIs) com MTTR, MTBF e Disponibilidade Média.
+ * O MTBF segue os critérios rigorosos de NOC:
+ * MTBF = (Tempo Total de Operação Planejado 24x7 - Downtime Não Planejado) / Número de Falhas Críticas
+ * A Disponibilidade Média do ambiente é a média aritmética da disponibilidade de cada host único no regime 24x7.
+ */
+export function computeKPIs(events: ZabbixEvent[], activeFilters?: Partial<ZabbixFilters>): ZabbixKPIs {
+  const calendarMetrics = calculatePeriodCalendarMetrics(events, activeFilters);
   const totalEventos = events.length;
+
   if (totalEventos === 0) {
     return {
       totalEventos: 0,
@@ -126,6 +377,31 @@ export function computeKPIs(events: ZabbixEvent[]): ZabbixKPIs {
       totalReconhecidos: 0,
       taxaAtuacaoPercentual: 0,
       totalRuidoOperacional: 0,
+      taxaDisponibilidadeMediaPct: 100,
+      totalHorasPlanejadasPeriodo: calendarMetrics.totalHoras,
+      totalDiasPeriodo: calendarMetrics.totalDias,
+      disponibilidadePorHost: [],
+      porSeveridade: {
+        Desastre: 0,
+        Alta: 0,
+        Alto: 0,
+        Média: 0,
+        Médio: 0,
+        Atenção: 0,
+        Aviso: 0,
+        Informação: 0,
+        'Não classificada': 0,
+      },
+      mtbfDetails: {
+        uptimePlanejadoSegundos: calendarMetrics.totalSegundos,
+        downtimePlanejadoSegundos: 0,
+        downtimeNaoPlanejadoSegundos: 0,
+        uptimeEfetivoSegundos: calendarMetrics.totalSegundos,
+        numeroFalhasCriticas: 0,
+        taxaDisponibilidadePct: 100,
+        totalDiasPeriodo: calendarMetrics.totalDias,
+        totalHorasPlanejadasPeriodo: calendarMetrics.totalHoras,
+      },
     };
   }
 
@@ -136,14 +412,44 @@ export function computeKPIs(events: ZabbixEvent[]): ZabbixKPIs {
   let totalReconhecidos = 0;
   let totalRuidoOperacional = 0;
 
-  let minDate: Date | null = null;
-  let maxDate: Date | null = null;
+  // Variáveis para o cálculo rigoroso de MTBF NOC
+  let downtimePlanejadoSegundos = 0;
+  let downtimeNaoPlanejadoSegundos = 0;
+  let numeroFalhasCriticas = 0;
 
-  const hostCounts = new Map<string, { count: number; duracaoSegundos: number }>();
+  const porSeveridade: Record<string, number> = {
+    Desastre: 0,
+    Alta: 0,
+    Alto: 0,
+    Média: 0,
+    Médio: 0,
+    Atenção: 0,
+    Aviso: 0,
+    Informação: 0,
+    'Não classificada': 0,
+  };
+
+  const hostCounts = new Map<
+    string,
+    {
+      count: number;
+      duracaoSegundos: number;
+      falhasCriticas: number;
+      downtimeNaoPlanejado: number;
+      downtimePlanejado: number;
+    }
+  >();
   const triggerCounts = new Map<string, number>();
 
   for (const evt of events) {
     duracaoTotalSegundos += evt.duracaoSegundos;
+
+    // Contagem por severidade
+    const sev = evt.severidade || 'Não classificada';
+    porSeveridade[sev] = (porSeveridade[sev] || 0) + 1;
+    if (sev === 'Alta') porSeveridade['Alto'] = (porSeveridade['Alto'] || 0) + 1;
+    if (sev === 'Média') porSeveridade['Médio'] = (porSeveridade['Médio'] || 0) + 1;
+    if (sev === 'Atenção') porSeveridade['Aviso'] = (porSeveridade['Aviso'] || 0) + 1;
 
     if (evt.status === 'INCIDENTE') {
       totalAbertos++;
@@ -160,30 +466,63 @@ export function computeKPIs(events: ZabbixEvent[]): ZabbixKPIs {
       totalRuidoOperacional++;
     }
 
-    if (evt.dataInicio) {
-      if (!minDate || evt.dataInicio < minDate) minDate = evt.dataInicio;
-      if (!maxDate || evt.dataInicio > maxDate) maxDate = evt.dataInicio;
+    // Classificação para cálculo do MTBF NOC e Disponibilidade
+    const isMaintenance = isPlannedMaintenanceEvent(evt);
+    const isOutage = isCriticalOutageEvent(evt);
+
+    if (isMaintenance) {
+      downtimePlanejadoSegundos += evt.duracaoSegundos;
+    } else if (isOutage) {
+      numeroFalhasCriticas++;
+      downtimeNaoPlanejadoSegundos += evt.duracaoSegundos;
     }
 
-    // Contagem por host
-    const hData = hostCounts.get(evt.host) || { count: 0, duracaoSegundos: 0 };
+    // Contagem por host (garante chave string limpa)
+    const safeHost =
+      typeof evt.host === 'object' && evt.host !== null
+        ? ((evt.host as any).host || String(evt.host))
+        : String(evt.host || 'Host Desconhecido');
+    const hData = hostCounts.get(safeHost) || {
+      count: 0,
+      duracaoSegundos: 0,
+      falhasCriticas: 0,
+      downtimeNaoPlanejado: 0,
+      downtimePlanejado: 0,
+    };
     hData.count++;
     hData.duracaoSegundos += evt.duracaoSegundos;
-    hostCounts.set(evt.host, hData);
+    if (isMaintenance) {
+      hData.downtimePlanejado += evt.duracaoSegundos;
+    } else if (isOutage) {
+      hData.falhasCriticas++;
+      hData.downtimeNaoPlanejado += evt.duracaoSegundos;
+    }
+    hostCounts.set(safeHost, hData);
 
-    // Contagem por trigger
-    triggerCounts.set(evt.incidente, (triggerCounts.get(evt.incidente) || 0) + 1);
+    // Contagem por trigger (garante chave string)
+    const safeTrigger =
+      typeof evt.incidente === 'object' && evt.incidente !== null
+        ? ((evt.incidente as any).trigger || (evt.incidente as any).name || String(evt.incidente))
+        : String(evt.incidente || 'Incidente sem descrição');
+    triggerCounts.set(safeTrigger, (triggerCounts.get(safeTrigger) || 0) + 1);
   }
 
-  // Host mais afetado
+  // Host mais afetado em volume
   let topHost = 'Nenhum';
   let topHostCount = 0;
   let topHostDuracao = 0;
+  let topHostFalhasCriticas = 0;
+  let topHostDowntimeNaoPlanejado = 0;
+  let topHostDowntimePlanejado = 0;
+
   for (const [h, data] of hostCounts.entries()) {
     if (data.count > topHostCount) {
       topHostCount = data.count;
-      topHost = h;
+      topHost = typeof h === 'object' && h !== null ? ((h as any).host || String(h)) : String(h);
       topHostDuracao = data.duracaoSegundos;
+      topHostFalhasCriticas = data.falhasCriticas;
+      topHostDowntimeNaoPlanejado = data.downtimeNaoPlanejado;
+      topHostDowntimePlanejado = data.downtimePlanejado;
     }
   }
 
@@ -193,7 +532,10 @@ export function computeKPIs(events: ZabbixEvent[]): ZabbixKPIs {
   for (const [t, count] of triggerCounts.entries()) {
     if (count > topTriggerCount) {
       topTriggerCount = count;
-      topTrigger = t;
+      topTrigger =
+        typeof t === 'object' && t !== null
+          ? ((t as any).trigger || (t as any).name || String(t))
+          : String(t);
     }
   }
 
@@ -201,21 +543,74 @@ export function computeKPIs(events: ZabbixEvent[]): ZabbixKPIs {
   const mttrSegundos = totalResolvidos > 0 ? Math.round(duracaoResolvidosSegundos / totalResolvidos) : 0;
   const taxaAtuacaoPercentual = Math.round((totalReconhecidos / totalEventos) * 100);
 
-  // Janela total observada para cálculo de MTBF
-  let windowSeconds = 0;
-  if (minDate && maxDate) {
-    windowSeconds = Math.max(1, Math.floor((maxDate.getTime() - minDate.getTime()) / 1000));
-  } else {
-    windowSeconds = duracaoTotalSegundos * 2;
+  // ========================================================
+  // CÁLCULO DE DISPONIBILIDADE MULTI-HOST E MTBF RIGOROSO NOC:
+  // Base horas: 744h (31 dias), 720h (30 dias), 672/696h (Fev) ou dias selecionados
+  // ========================================================
+  const windowSeconds = calendarMetrics.totalSegundos;
+
+  // Calcula a disponibilidade individual de cada host único
+  const disponibilidadePorHost: Array<{
+    host: string;
+    disponibilidadePct: number;
+    downtimeSegundos: number;
+    falhasCriticas: number;
+  }> = [];
+
+  for (const [h, data] of hostCounts.entries()) {
+    const hostPlanned = Math.max(1, windowSeconds - data.downtimePlanejado);
+    const hostEffective = Math.max(0, hostPlanned - data.downtimeNaoPlanejado);
+    const hostDispPct = Math.min(
+      100,
+      Math.max(0, Number(((hostEffective / hostPlanned) * 100).toFixed(2)))
+    );
+    disponibilidadePorHost.push({
+      host: h,
+      disponibilidadePct: hostDispPct,
+      downtimeSegundos: data.downtimeNaoPlanejado,
+      falhasCriticas: data.falhasCriticas,
+    });
   }
 
-  // MTBF Global
-  const uptimeGlobalSeconds = Math.max(0, windowSeconds - duracaoTotalSegundos);
-  const mtbfSegundosGlobal = totalEventos > 0 ? Math.round(uptimeGlobalSeconds / totalEventos) : 0;
+  // Ordena por menor disponibilidade (principais ofensores de SLA primeiro)
+  disponibilidadePorHost.sort((a, b) => a.disponibilidadePct - b.disponibilidadePct);
+
+  // Disponibilidade Média do Ambiente = Média aritmética de cada host
+  let taxaDisponibilidadeMediaPct = 100;
+  if (disponibilidadePorHost.length > 0) {
+    const sumAvail = disponibilidadePorHost.reduce((acc, curr) => acc + curr.disponibilidadePct, 0);
+    taxaDisponibilidadeMediaPct = Number(
+      (sumAvail / disponibilidadePorHost.length).toFixed(2)
+    );
+  }
+
+  // Uptime Efetivo Médio do Ambiente para o MTBF Global
+  const uptimePlanejadoLiquido = Math.max(
+    1,
+    windowSeconds - Math.round(downtimePlanejadoSegundos / Math.max(1, hostCounts.size))
+  );
+  const uptimeEfetivoGlobal = Math.max(
+    0,
+    Math.round((taxaDisponibilidadeMediaPct / 100) * uptimePlanejadoLiquido)
+  );
+
+  // MTBF Global = Tempo efetivo médio em operação / Número de falhas críticas
+  let mtbfSegundosGlobal = 0;
+  if (numeroFalhasCriticas > 0) {
+    mtbfSegundosGlobal = Math.round(uptimeEfetivoGlobal / numeroFalhasCriticas);
+  } else {
+    mtbfSegundosGlobal = uptimeEfetivoGlobal;
+  }
 
   // MTBF Host Crítico
-  const uptimeHostSeconds = Math.max(0, windowSeconds - topHostDuracao);
-  const mtbfSegundosHostCritico = topHostCount > 0 ? Math.round(uptimeHostSeconds / topHostCount) : 0;
+  const uptimePlanejadoHostCritico = Math.max(1, windowSeconds - topHostDowntimePlanejado);
+  const uptimeEfetivoHost = Math.max(0, uptimePlanejadoHostCritico - topHostDowntimeNaoPlanejado);
+  let mtbfSegundosHostCritico = 0;
+  if (topHostFalhasCriticas > 0) {
+    mtbfSegundosHostCritico = Math.round(uptimeEfetivoHost / topHostFalhasCriticas);
+  } else {
+    mtbfSegundosHostCritico = uptimeEfetivoHost;
+  }
 
   return {
     totalEventos,
@@ -231,6 +626,21 @@ export function computeKPIs(events: ZabbixEvent[]): ZabbixKPIs {
     totalReconhecidos,
     taxaAtuacaoPercentual,
     totalRuidoOperacional,
+    taxaDisponibilidadeMediaPct,
+    totalHorasPlanejadasPeriodo: calendarMetrics.totalHoras,
+    totalDiasPeriodo: calendarMetrics.totalDias,
+    disponibilidadePorHost,
+    porSeveridade,
+    mtbfDetails: {
+      uptimePlanejadoSegundos: windowSeconds,
+      downtimePlanejadoSegundos,
+      downtimeNaoPlanejadoSegundos,
+      uptimeEfetivoSegundos: uptimeEfetivoGlobal,
+      numeroFalhasCriticas,
+      taxaDisponibilidadePct: taxaDisponibilidadeMediaPct,
+      totalDiasPeriodo: calendarMetrics.totalDias,
+      totalHorasPlanejadasPeriodo: calendarMetrics.totalHoras,
+    },
   };
 }
 
@@ -340,14 +750,14 @@ export function formatActiveFiltersSummary(
 
   // Etiquetas (Tags)
   if (filters.tagKey) {
-    const valStr = filters.tagValues.length > 0 ? filters.tagValues.join(', ') : 'Qualquer valor';
+    const valStr = filters.tagValues && filters.tagValues.length > 0 ? filters.tagValues.join(', ') : 'Qualquer valor';
     lines.push(`- **Etiquetas (Tags):** Chave "${filters.tagKey}" = [${valStr}]`);
   } else {
     lines.push('- **Etiquetas (Tags):** Sem restrição de tags');
   }
 
   // Busca textual
-  if (filters.searchQuery.trim()) {
+  if (filters.searchQuery && filters.searchQuery.trim()) {
     lines.push(`- **Busca Textual Ativa:** "${filters.searchQuery.trim()}"`);
   }
 
@@ -358,14 +768,49 @@ export function formatActiveFiltersSummary(
 }
 
 /**
+ * Busca a expressão de trigger correspondente no catálogo do cliente por Host e Incidente/Trigger.
+ */
+export function findTriggerExpression(
+  host: string,
+  incidente: string,
+  catalog?: ClientTriggerCatalog | null
+): ZabbixTriggerCatalogItem | undefined {
+  if (!catalog || !catalog.items || catalog.items.length === 0) return undefined;
+
+  const hNorm = (host || '').trim().toLowerCase();
+  const iNorm = (incidente || '').trim().toLowerCase();
+
+  // 1. Busca exata por host e incidente/nome
+  let match = catalog.items.find(
+    (item) => item.host.trim().toLowerCase() === hNorm && item.name.trim().toLowerCase() === iNorm
+  );
+  if (match) return match;
+
+  // 2. Busca aproximada por host (se contiver hostname base) e nome idêntico
+  match = catalog.items.find((item) => {
+    const itemH = item.host.trim().toLowerCase();
+    const itemN = item.name.trim().toLowerCase();
+    const hostMatch = itemH === hNorm || (itemH && (hNorm.includes(itemH) || itemH.includes(hNorm)));
+    return hostMatch && itemN === iNorm;
+  });
+  if (match) return match;
+
+  // 3. Fallback: trigger name exato se for template global
+  match = catalog.items.find((item) => item.name.trim().toLowerCase() === iNorm);
+  return match;
+}
+
+/**
  * Gera Prompt estruturado para IA sugerir ajustes e tuning em triggers Zabbix
- * rigorosamente alinhado com o que está filtrado/selecionado pelo usuário.
+ * rigorosamente alinhado com o que está filtrado/selecionado pelo usuário
+ * e enriquecido com as expressões reais da planilha caso disponíveis.
  */
 export function generateTriggerTuningPrompt(
   events: ZabbixEvent[],
   kpis: ZabbixKPIs,
   filters: ZabbixFilters,
-  rawTotal: number
+  rawTotal: number,
+  catalog?: ClientTriggerCatalog | null
 ): string {
   const scopeSummary = formatActiveFiltersSummary(filters, rawTotal, events.length);
 
@@ -414,8 +859,24 @@ export function generateTriggerTuningPrompt(
     .slice(0, 7)
     .map(([trigger, data]) => {
       const avgSec = Math.round(data.totalDur / data.count);
-      return `- **Trigger**: "${trigger}"\n  - Ocorrências no escopo: ${data.count} vezes\n  - Duração média da falha: ${formatDuration(avgSec)}\n  - Hosts impactados (${data.hosts.size}): ${Array.from(data.hosts).slice(0, 3).join(', ')}${data.hosts.size > 3 ? '...' : ''}\n  - Severidades: ${Array.from(data.severities).join(', ')}`;
+      const firstHost = Array.from(data.hosts)[0] || '';
+      // Procura primeiro a expressão vinda diretamente da planilha (coluna Expressão das 15 colunas)
+      const eventWithExpr = events.find((ev) => ev.incidente === trigger && ev.expressao);
+      const directExpr = eventWithExpr?.expressao;
+      const matchedCatalogItem = directExpr
+        ? { expression: directExpr }
+        : findTriggerExpression(firstHost, trigger, catalog);
+      const exprBlock = matchedCatalogItem
+        ? `\n  - **Expressão Real Atual no Zabbix:** \`${matchedCatalogItem.expression}\``
+        : '';
+
+      return `- **Trigger**: "${trigger}"\n  - Ocorrências no escopo: ${data.count} vezes\n  - Duração média da falha: ${formatDuration(avgSec)}\n  - Hosts impactados (${data.hosts.size}): ${Array.from(data.hosts).slice(0, 3).join(', ')}${data.hosts.size > 3 ? '...' : ''}\n  - Severidades: ${Array.from(data.severities).join(', ')}${exprBlock}`;
     });
+
+  const hasDirectExpressions = events.some((e) => !!e.expressao);
+  const catalogAvailableInfo = hasDirectExpressions || (catalog && catalog.items.length > 0)
+    ? `\n---\n\n### EXPRESSÕES TÉCNICAS REAIS DO ZABBIX MAPEADAS DA PLANILHA:\nPara as triggers com "**Expressão Real Atual no Zabbix**", realize uma análise criteriosa e tuning cirúrgico direto sobre a fórmula matemática do Zabbix, apontando os parâmetros de amostragem (\`#3\`, tempo de histerese) e funções que devem ser refatoradas.`
+    : '';
 
   return `# PROMPT PARA ENGENHARIA E TUNING DE TRIGGERS ZABBIX
 
@@ -437,6 +898,7 @@ ${scopeSummary}
 - MTTR médio do escopo: ${formatDuration(kpis.mttrSegundos)}
 - MTBF no escopo: ${formatDuration(kpis.mtbfSegundosGlobal)}
 - Host mais afetado: "${kpis.hostMaisAfetado.host}" (${kpis.hostMaisAfetado.count} eventos)
+${catalogAvailableInfo}
 
 ---
 
@@ -450,8 +912,8 @@ ${topNoise.length > 0 ? topNoise.join('\n\n') : 'Nenhuma trigger de curta duraç
    - Analise especificamente as triggers e hosts identificados no escopo acima.
    - Explique a causa física/lógica provável para a oscilação desses itens sob a perspectiva do escopo filtrado.
 2. **Engenharia de Expressões Zabbix Otimizadas (Zabbix 6.x/7.x)**:
-   - Forneça a sintaxe exata para cada trigger problemática.
-   - Substitua chamadas sensíveis \`last()\` por funções de agregação temporal: \`min(/host/item, 5m)\`, \`avg(/host/item, 10m)\`, ou \`count(/host/item, 5m,"gt",90) >= 3\`.
+   - Forneça a sintaxe exata e ajustada para cada trigger problemática, refatorando diretamente as expressões reais do cliente se informadas.
+   - Substitua chamadas sensíveis \`last()\` por funções de agregação temporal ou amostragem expandida: \`min(/host/item, 5m)\`, \`avg(/host/item, 10m)\`, ou \`count(/host/item, #5,"ne",0) >= 4\`.
 3. **Estratégia de Hysteresis (Expressão de Problema vs Expressão de Recuperação)**:
    - Para evitar reaberturas sucessivas, forneça o par de expressões:
      - **Problem Expression**: Condição rigorosa de ativação.
@@ -516,7 +978,11 @@ ${scopeSummary}
 - **Duração Total Acumulada de Indisponibilidade:** ${formatDuration(kpis.duracaoTotalSegundos)}
 - **Duração Média por Incidente:** ${formatDuration(kpis.duracaoMediaSegundos)}
 - **MTTR (Mean Time To Resolve):** ${formatDuration(kpis.mttrSegundos)}
-- **MTBF (Mean Time Between Failures):** ${formatDuration(kpis.mtbfSegundosGlobal)}
+- **MTBF (Mean Time Between Failures - Padrão NOC):** ${formatDuration(kpis.mtbfSegundosGlobal)}
+  * Uptime Planejado 24x7: ${formatDuration(kpis.mtbfDetails?.uptimePlanejadoSegundos || 0)}
+  * Downtime Não Planejado: ${formatDuration(kpis.mtbfDetails?.downtimeNaoPlanejadoSegundos || 0)}
+  * Falhas Críticas de Indisponibilidade: ${kpis.mtbfDetails?.numeroFalhasCriticas || 0}
+  * Disponibilidade Efetiva Calculada: ${kpis.mtbfDetails?.taxaDisponibilidadePct ?? 100}%
 - **Taxa de Atuação Operacional (Ack):** ${kpis.taxaAtuacaoPercentual}% dos eventos foram reconhecidos pelo NOC
 - **Host Mais Afetado no Escopo:** "${kpis.hostMaisAfetado.host}" com ${kpis.hostMaisAfetado.count} eventos (MTBF individual: ${formatDuration(kpis.mtbfSegundosHostCritico)})
 - **Trigger Mais Recorrente no Escopo:** "${kpis.triggerMaisFrequente.trigger}" (${kpis.triggerMaisFrequente.count} ocorrências)
@@ -539,6 +1005,128 @@ ${scopeSummary}
    - Liste 3 ações prioritárias imediatas (quick wins) e 2 ações estruturais de médio prazo para a liderança técnica.
 
 Adote tom executivo, objetivo, elegante e analítico, sem floreios desnecessários e mantendo coerência absoluta com os filtros informados.`;
+}
+
+/**
+ * Gera Prompt estruturado para o "Book de Resultados Estratégicos" (Executivo + Técnico Unificado)
+ * Consolida governança C-Level, SLA, diagnóstico cirúrgico de flapping Zabbix 7.0 e roadmap integrado.
+ */
+export function generateBookDeResultadosPrompt(
+  events: ZabbixEvent[],
+  kpis: ZabbixKPIs,
+  filters: ZabbixFilters,
+  rawTotal: number,
+  catalog?: ClientTriggerCatalog | null,
+  customDirectives?: string
+): string {
+  const scopeSummary = formatActiveFiltersSummary(filters, rawTotal, events.length);
+
+  // Severidades
+  const sevCounts: Record<string, number> = {};
+  for (const s of SEVERITY_ORDER) sevCounts[s] = 0;
+  for (const e of events) sevCounts[e.severidade] = (sevCounts[e.severidade] || 0) + 1;
+  const sevSummary = SEVERITY_ORDER.map((s) => `${s}: ${sevCounts[s]}`).join(' | ');
+
+  // Top 5 ofensores com severidades e expressões se disponíveis
+  const hostStats = new Map<string, { count: number; dur: number; sev: Set<string> }>();
+  for (const e of events) {
+    const h = typeof e.host === 'object' && e.host !== null ? (e.host as any).host : String(e.host || '');
+    if (!h) continue;
+    const item = hostStats.get(h) || { count: 0, dur: 0, sev: new Set<string>() };
+    item.count++;
+    item.dur += e.duracaoSegundos;
+    item.sev.add(e.severidade);
+    hostStats.set(h, item);
+  }
+  const topHosts = Array.from(hostStats.entries())
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, 5)
+    .map(([h, data]) => `- **${h}**: ${data.count} incidentes (${formatDuration(data.dur)} acumulados) · Severidades: ${Array.from(data.sev).join(', ')}`);
+
+  // Top triggers de flapping
+  const triggerStats = new Map<string, { count: number; dur: number; host: string }>();
+  for (const e of events) {
+    const t = typeof e.incidente === 'object' && e.incidente !== null ? (e.incidente as any).trigger || String(e.incidente) : String(e.incidente || '');
+    if (!t) continue;
+    const item = triggerStats.get(t) || { count: 0, dur: 0, host: String(e.host || '') };
+    item.count++;
+    item.dur += e.duracaoSegundos;
+    triggerStats.set(t, item);
+  }
+  const topTriggers = Array.from(triggerStats.entries())
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, 5)
+    .map(([t, data]) => {
+      const avgSec = Math.round(data.dur / data.count);
+      const matchedCatalogItem = findTriggerExpression(data.host, t, catalog);
+      const exprStr = matchedCatalogItem ? `\n    * Expressão Zabbix mapeada: \`${matchedCatalogItem.expression}\`` : '';
+      return `- **"${t}"** (${data.count} ocorrências, média: ${formatDuration(avgSec)})${exprStr}`;
+    });
+
+  const customBlock = customDirectives && customDirectives.trim()
+    ? `\n---\n\n### DIRETRIZES ESPECÍFICAS INFORMADAS PELO AUDITOR:\n${customDirectives.trim()}\n`
+    : '';
+
+  return `# PROMPT: BOOK DE RESULTADOS ESTRATÉGICOS (EXECUTIVO & TÉCNICO UNIFICADO)
+Você é um Arquiteto Principal de Observabilidade e Consultor Sênior de Estratégia de TI (Zabbix Certified Expert & ITIL v4 Master).
+
+Elabore o **BOOK DE RESULTADOS DE OBSERVABILIDADE & CONFIABILIDADE**, um relatório de alto impacto que unifica rigorosamente a visão estratégica de Diretoria (C-Level/CIO) com a precisão cirúrgica de Engenharia de Confiabilidade (SRE/Zabbix 7.0).
+
+---
+
+### ESCOPO DOS FILTROS APLICADOS NESTA AUDITORIA:
+${scopeSummary}
+${customBlock}
+---
+
+### INDICADORES MACRO CONSOLIDADOS (C-LEVEL):
+- **Incidentes Registrados no Escopo:** ${kpis.totalEventos} (${rawTotal > 0 ? Math.round((kpis.totalEventos / rawTotal) * 100) : 0}% de ${rawTotal} eventos da base)
+- **Status Operacional:** ${kpis.totalAbertos} abertos (${kpis.totalAbertos > 0 ? 'CRÍTICO' : 'Normalizado'}) | ${kpis.totalResolvidos} resolvidos
+- **Indisponibilidade Acumulada:** ${formatDuration(kpis.duracaoTotalSegundos)}
+- **MTTR Médio:** ${formatDuration(kpis.mttrSegundos)}
+- **MTBF Consolidado (Critérios NOC):** ${formatDuration(kpis.mtbfSegundosGlobal)}
+  * Uptime Planejado 24x7: ${formatDuration(kpis.mtbfDetails?.uptimePlanejadoSegundos || 0)}
+  * Downtime Não Planejado: ${formatDuration(kpis.mtbfDetails?.downtimeNaoPlanejadoSegundos || 0)}
+  * Falhas Críticas de Indisponibilidade: ${kpis.mtbfDetails?.numeroFalhasCriticas || 0}
+  * Disponibilidade Efetiva do Período: ${kpis.mtbfDetails?.taxaDisponibilidadePct ?? 100}%
+- **Taxa de Atendimento NOC (Ack):** ${kpis.taxaAtuacaoPercentual}% dos alertas foram reconhecidos
+- **Índice de Ruído (< 5 min):** ${kpis.totalRuidoOperacional} eventos (${kpis.totalEventos > 0 ? Math.round((kpis.totalRuidoOperacional / kpis.totalEventos) * 100) : 0}% dos alarmes se autorresolveram)
+- **Distribuição de Severidade:** ${sevSummary}
+
+---
+
+### TOP 5 OFENSORES DE INFRAESTRUTURA:
+${topHosts.length > 0 ? topHosts.join('\n') : 'Nenhum ofensor isolado encontrado.'}
+
+---
+
+### TOP TRIGGERS COM PADRÃO DE FLAPPING / OSCILAÇÃO:
+${topTriggers.length > 0 ? topTriggers.join('\n') : 'Nenhuma trigger crítica de ruído identificada.'}
+
+---
+
+### ESTRUTURA OBRIGATÓRIA DO BOOK DE RESULTADOS (4 PILARES):
+
+1. **PILAR I: SUMÁRIO EXECUTIVO & GOVERNANÇA DE NEGÓCIO (C-LEVEL)**
+   - Parecer de estabilidade, impacto financeiro/produtividade e conformidade de SLA.
+   - Avaliação do ruído operacional de ${kpis.totalRuidoOperacional} incidentes no custo humano da equipe.
+
+2. **PILAR II: MATRIZ DE OFENSORES & DIAGNÓSTICO DE CAUSA RAIZ**
+   - Análise detalhada dos servidores que concentram incidentes, em especial "${kpis.hostMaisAfetado?.host || 'Hosts mais impactados'}".
+   - Correlação entre incidentes de curta duração e gargalos sistêmicos de rede, banco ou disco.
+
+3. **PILAR III: ENGENHARIA DE TRIGGERS & CALIBRAÇÃO ZABBIX 7.0**
+   - Parecer técnico sobre os gatilhos mais frequentes ("${kpis.triggerMaisFrequente?.trigger || (kpis as any).incidenteMaisFrequente?.incidente || 'Triggers principais'}").
+   - Sintaxe recomendada para eliminação de flapping, especificando:
+     * Função Zabbix 7.0 adequada (substituição de \`last()\` instantâneo por agregação temporal \`min()\` ou \`avg()\`);
+     * Par de Histerese (Problem Expression vs Recovery Expression) para estabilização definitiva.
+
+4. **PILAR IV: ROADMAP INTEGRADO DE AÇÕES ESTRATÉGICAS**
+   - **Imediato (0-7 dias):** 2 ações de quick win no Zabbix frontend para supressão imediata de alarmes falsos;
+   - **Curto Prazo (8-30 dias):** Calibração de templates e definição de dependências lógicas;
+   - **Médio Prazo (30-90 dias):** Governança de observabilidade, tags padronizadas e automação de remediação.
+
+Adote tom corporativo, seguro, fundamentado estritamente nas métricas reais acima, sem especulações genéricas.`;
 }
 
 /**
@@ -590,3 +1178,329 @@ export function exportToCSV(events: ZabbixEvent[], filename: string = 'relatorio
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+
+export interface ReportPeriodInfo {
+  mesAno: string;
+  isoAnoMes: string;
+  periodoDescricao: string;
+  isFiltered: boolean;
+}
+
+/**
+ * Extrai rigorosamente o período e mês/ano (recorte) do relatório com base nos filtros ativos
+ * ou no intervalo real dos eventos filtrados, garantindo que o relatório acompanhe o filtro do usuário.
+ */
+export function getReportPeriodInfo(
+  filters?: Partial<ZabbixFilters>,
+  events: ZabbixEvent[] = []
+): ReportPeriodInfo {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const now = new Date();
+
+  const parseFilterDate = (str?: string) => {
+    if (!str || typeof str !== 'string') return null;
+    const m = str.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/);
+    if (!m) return null;
+    return {
+      year: parseInt(m[1], 10),
+      month: parseInt(m[2], 10), // 1-12
+      day: parseInt(m[3], 10),
+      rawStr: str,
+    };
+  };
+
+  const fromParts = parseFilterDate(filters?.dateFrom);
+  const toParts = parseFilterDate(filters?.dateTo);
+
+  let mesAno = '';
+  let isoAnoMes = '';
+  let periodoDescricao = '';
+  let isFiltered = false;
+
+  if (fromParts && toParts) {
+    isFiltered = true;
+    if (fromParts.year === toParts.year && fromParts.month === toParts.month) {
+      // Ex: 09/2026
+      mesAno = `${pad(fromParts.month)}/${fromParts.year}`;
+      isoAnoMes = `${fromParts.year}-${pad(fromParts.month)}`;
+      periodoDescricao = `${pad(fromParts.day)}/${pad(fromParts.month)}/${fromParts.year} a ${pad(toParts.day)}/${pad(toParts.month)}/${toParts.year}`;
+    } else {
+      // Ex: 08/2026 – 09/2026
+      mesAno = `${pad(fromParts.month)}/${fromParts.year} – ${pad(toParts.month)}/${toParts.year}`;
+      isoAnoMes = `${fromParts.year}-${pad(fromParts.month)}_${toParts.year}-${pad(toParts.month)}`;
+      periodoDescricao = `${pad(fromParts.day)}/${pad(fromParts.month)}/${fromParts.year} a ${pad(toParts.day)}/${pad(toParts.month)}/${toParts.year}`;
+    }
+  } else if (fromParts) {
+    isFiltered = true;
+    mesAno = `${pad(fromParts.month)}/${fromParts.year}`;
+    isoAnoMes = `${fromParts.year}-${pad(fromParts.month)}`;
+    periodoDescricao = `A partir de ${pad(fromParts.day)}/${pad(fromParts.month)}/${fromParts.year}`;
+  } else if (toParts) {
+    isFiltered = true;
+    mesAno = `${pad(toParts.month)}/${toParts.year}`;
+    isoAnoMes = `${toParts.year}-${pad(toParts.month)}`;
+    periodoDescricao = `Até ${pad(toParts.day)}/${pad(toParts.month)}/${toParts.year}`;
+  } else {
+    // Se não há filtro explícito de data, busca o intervalo real dos eventos fornecidos
+    let minDate: Date | null = null;
+    let maxDate: Date | null = null;
+    for (const e of events) {
+      if (e.dataInicio) {
+        if (!minDate || e.dataInicio < minDate) minDate = e.dataInicio;
+        if (!maxDate || e.dataInicio > maxDate) maxDate = e.dataInicio;
+      }
+    }
+
+    if (minDate && maxDate) {
+      const minM = minDate.getMonth() + 1;
+      const minY = minDate.getFullYear();
+      const maxM = maxDate.getMonth() + 1;
+      const maxY = maxDate.getFullYear();
+
+      if (minY === maxY && minM === maxM) {
+        mesAno = `${pad(minM)}/${minY}`;
+        isoAnoMes = `${minY}-${pad(minM)}`;
+      } else {
+        mesAno = `${pad(minM)}/${minY} – ${pad(maxM)}/${maxY}`;
+        isoAnoMes = `${minY}-${pad(minM)}_${maxY}-${pad(maxM)}`;
+      }
+      periodoDescricao = `${pad(minDate.getDate())}/${pad(minM)}/${minY} a ${pad(maxDate.getDate())}/${pad(maxM)}/${maxY}`;
+    } else {
+      mesAno = `${pad(now.getMonth() + 1)}/${now.getFullYear()}`;
+      isoAnoMes = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+      periodoDescricao = mesAno;
+    }
+  }
+
+  return { mesAno, isoAnoMes, periodoDescricao, isFiltered };
+}
+
+export interface OptimizedTriggerEngineeringItem {
+  triggerName: string;
+  hostName: string;
+  hostCount: number;
+  count: number;
+  avgDurationSec: number;
+  severity: string;
+  originalExpression?: string;
+  problemExpression: string;
+  problemExplanation: string;
+  recoveryExpression: string;
+  recoveryExplanation: string;
+  technicalRootCause: string;
+}
+
+/**
+ * Deriva dinamicamente a Engenharia de Expressões Otimizadas e Histerese (Zabbix 6.x/7.x)
+ * a partir dos top incidentes e das expressões reais (coluna Expressão da planilha de 15 colunas).
+ */
+export function deriveOptimizedTriggerEngineering(
+  topTriggers: [string, { count: number; totalDur: number; sev: string; hosts: Set<string> }][],
+  events: ZabbixEvent[],
+  maxItems: number = 3
+): OptimizedTriggerEngineeringItem[] {
+  const result: OptimizedTriggerEngineeringItem[] = [];
+
+  for (const [triggerName, meta] of topTriggers.slice(0, maxItems)) {
+    // Localiza os eventos desse gatilho para capturar a expressão real e o host real
+    const matchedEvents = events.filter((e) => e.incidente === triggerName);
+    const eventWithExpr = matchedEvents.find((e) => e.expressao && e.expressao.trim() !== '') || matchedEvents[0];
+    const hostName = eventWithExpr?.host || Array.from(meta.hosts)[0] || 'host-corporativo';
+    const originalExpr = eventWithExpr?.expressao?.trim();
+    const avgSec = meta.count > 0 ? Math.round(meta.totalDur / meta.count) : 0;
+
+    let problemExpression = '';
+    let problemExplanation = '';
+    let recoveryExpression = '';
+    let recoveryExplanation = '';
+    let technicalRootCause = '';
+
+    if (avgSec < 300) {
+      technicalRootCause = `Oscilação instantânea com duração média de ${formatDuration(avgSec)}. O alarme encerra antes da equipe atuar, indicando falta de histerese e sensibilidade excessiva a coletas isoladas.`;
+    } else {
+      technicalRootCause = `Tempo médio de resolução em ${formatDuration(avgSec)}. Concentração em ${meta.hosts.size} host(s) requer amortecimento temporal para evitar flapping prolongado.`;
+    }
+
+    // 1. Caso o usuário tenha a coluna Expressão preenchida na planilha
+    if (originalExpr) {
+      // Caso 1.1: Expressão com nodata(...)
+      // Ex: nodata(/"servidor"/oracle.uptime,5m)=1 ou nodata(/host/item, 3m)=1
+      const nodataMatch = originalExpr.match(/nodata\(\s*([^,)]+)\s*(?:,\s*([^)]+))?\s*\)(?:\s*=\s*1)?/i);
+      if (nodataMatch) {
+        const itemTarget = nodataMatch[1].trim();
+        problemExpression = `nodata(${itemTarget}, 10m) = 1`;
+        problemExplanation = 'PROBLEM EXPRESSION (ATIVAÇÃO APÓS 10M DE FALHA CONTÍNUA): Elimina timeouts e falhas esporádicas de conexão';
+        recoveryExpression = `nodata(${itemTarget}, 5m) = 0`;
+        recoveryExplanation = 'RECOVERY EXPRESSION (ENCERRAMENTO APÓS 5M DE ESTABILIDADE): Encerramento confirmado somente após 5 minutos de telemetria contínua';
+      }
+      // Caso 1.2: Expressão com last(...) ou {host:item.last()}
+      else if (/last\(/i.test(originalExpr) || /\.last\(/i.test(originalExpr)) {
+        if (/=\s*0/.test(originalExpr)) {
+          const itemTarget = originalExpr.replace(/^last\(/i, '').replace(/\)\s*=\s*0.*$/, '').trim() || `/${hostName}/service.status`;
+          problemExpression = `max(${itemTarget}, 10m) = 0`;
+          problemExplanation = 'PROBLEM EXPRESSION (SERVIÇO DOWN SUSTENTADO POR 10M): Suprime reinicializações e reciclagens normais de processos';
+          recoveryExpression = `min(${itemTarget}, 5m) > 0`;
+          recoveryExplanation = 'RECOVERY EXPRESSION (RETORNO DE SAÚDE POR 5M): Confirma recuperação estável da porta ou serviço';
+        } else if (/>=?\s*(\d+)/.test(originalExpr)) {
+          const m = originalExpr.match(/>=?\s*(\d+)/);
+          const threshold = m ? parseInt(m[1], 10) : 80;
+          const recThreshold = Math.max(1, Math.round(threshold * 0.85));
+          const itemTarget = originalExpr.replace(/^last\(/i, '').replace(/\)\s*>=?.*$/, '').trim() || `/${hostName}/metric.util`;
+          problemExpression = `min(${itemTarget}, 10m) > ${threshold}`;
+          problemExplanation = `PROBLEM EXPRESSION (MÍNIMO SUSTENTADO > ${threshold}% POR 10M): Evita picos instantâneos isolados`;
+          recoveryExpression = `max(${itemTarget}, 5m) < ${recThreshold}`;
+          recoveryExplanation = `RECOVERY EXPRESSION (RECUPERAÇÃO PÓS-HISTERESE < ${recThreshold}% POR 5M): Encerra com banda morta de amortecimento`;
+        } else {
+          problemExpression = originalExpr.replace(/last\(/gi, 'min(').replace(/\)/g, ', 10m)');
+          problemExplanation = 'PROBLEM EXPRESSION: Amortecimento temporal de 10 minutos para validação de persistência';
+          recoveryExpression = originalExpr.replace(/last\(/gi, 'max(').replace(/\)/g, ', 5m)').replace(/>/g, '<');
+          recoveryExplanation = 'RECOVERY EXPRESSION: Critério de estabilização pós-incidente por 5 minutos';
+        }
+      }
+      // Caso 1.3: Expressão já contém min/avg/max ou outra função Zabbix
+      else {
+        problemExpression = originalExpr;
+        problemExplanation = 'PROBLEM EXPRESSION: Expressão mapeada diretamente da planilha de 15 colunas do cliente';
+        recoveryExpression = `nodata(/${hostName}/agent.ping, 5m) = 0`;
+        recoveryExplanation = 'RECOVERY EXPRESSION: Critério complementar de retorno à normalidade';
+      }
+    } else {
+      // 2. Caso a planilha não possua a coluna Expressão preenchida para esse incidente específico:
+      // Deriva automaticamente usando o HOST REAL e o nome do incidente real do cliente
+      const lower = triggerName.toLowerCase();
+
+      if (lower.includes('oracle') || lower.includes('banco') || lower.includes('database') || lower.includes('coletar dados') || lower.includes('redo')) {
+        problemExpression = `nodata(/${hostName}/oracle.uptime, 10m) = 1`;
+        problemExplanation = 'PROBLEM EXPRESSION (ATIVAÇÃO APÓS 10M DE FALHA CONTÍNUA): Elimina micro-timeouts momentâneos de conexão ODBC/poller';
+        recoveryExpression = `nodata(/${hostName}/oracle.uptime, 5m) = 0`;
+        recoveryExplanation = 'RECOVERY EXPRESSION (ENCERRAMENTO APÓS 5M DE ESTABILIDADE): Encerra o incidente após 5 minutos comprovados de coleta estável';
+      } else if (lower.includes('heap') || lower.includes('memory') || lower.includes('memória') || lower.includes('portlet') || lower.includes('ram')) {
+        problemExpression = `min(/${hostName}/vm.memory.util, 10m) > 80`;
+        problemExplanation = 'PROBLEM EXPRESSION (MÍNIMO SUSTENTADO > 80% POR 10M): Aguarda atuação do Garbage Collector (GC) da JVM antes de alertar';
+        recoveryExpression = `max(/${hostName}/vm.memory.util, 5m) < 70`;
+        recoveryExplanation = 'RECOVERY EXPRESSION (RECUPERAÇÃO PÓS-GC < 70% POR 5M): Fecha o incidente com folga de histerese (banda morta de 10%)';
+      } else if (lower.includes('ping') || lower.includes('icmp') || lower.includes('response time') || lower.includes('latência') || lower.includes('unreachable')) {
+        problemExpression = `min(/${hostName}/icmpping, 5m) = 0`;
+        problemExplanation = 'PROBLEM EXPRESSION (QUEDA CONFIRMADA POR 5M): Filtra perda pontual de pacotes em roteadores intermediários';
+        recoveryExpression = `min(/${hostName}/icmpping, 3m) = 1`;
+        recoveryExplanation = 'RECOVERY EXPRESSION (RESPOSTA CONTÍNUA POR 3M): Confirma retorno estável da rota antes de normalizar';
+      } else if (lower.includes('cpu') || lower.includes('process') || lower.includes('load')) {
+        problemExpression = `min(/${hostName}/system.cpu.util, 10m) > 85`;
+        problemExplanation = 'PROBLEM EXPRESSION (CARGA ALTA SUSTENTADA POR 10M): Ignora crons, backups e picos momentâneos de execução';
+        recoveryExpression = `max(/${hostName}/system.cpu.util, 5m) < 70`;
+        recoveryExplanation = 'RECOVERY EXPRESSION (ESTABILIZAÇÃO < 70% POR 5M): Exige normalização consistente da fila de processamento';
+      } else if (lower.includes('disk') || lower.includes('disco') || lower.includes('space') || lower.includes('fs')) {
+        problemExpression = `last(/${hostName}/vfs.fs.size[/,pused]) > 90 and min(/${hostName}/vfs.fs.size[/,pused], 1h) > 88`;
+        problemExplanation = 'PROBLEM EXPRESSION (CONSUMO CRÍTICO SUSTENTADO): Confirma saturação real sem falsos alarmes de arquivos temporários';
+        recoveryExpression = `max(/${hostName}/vfs.fs.size[/,pused], 10m) < 85`;
+        recoveryExplanation = 'RECOVERY EXPRESSION (LIBERAÇÃO EFETIVA DE ESPAÇO): Normaliza após limpeza ou expansão de volume confirmada';
+      } else {
+        problemExpression = `min(/${hostName}/service.status, 5m) = 0`;
+        problemExplanation = 'PROBLEM EXPRESSION (INDISPONIBILIDADE POR 5M): Garante persistência da falha antes de notificar operadores';
+        recoveryExpression = `min(/${hostName}/service.status, 3m) = 1`;
+        recoveryExplanation = 'RECOVERY EXPRESSION (RETORNO DE SAÚDE POR 3M): Previne abertura e fechamento cíclico (flapping)';
+      }
+    }
+
+    result.push({
+      triggerName,
+      hostName,
+      hostCount: meta.hosts.size,
+      count: meta.count,
+      avgDurationSec: avgSec,
+      severity: meta.sev,
+      originalExpression: originalExpr,
+      problemExpression,
+      problemExplanation,
+      recoveryExpression,
+      recoveryExplanation,
+      technicalRootCause,
+    });
+  }
+
+  return result;
+}
+
+/**
+ * Computa métricas comparativas entre o período atual e o período comparativo selecionado
+ */
+export function computeComparativeMetrics(
+  rawEvents: ZabbixEvent[],
+  activeFilters: ZabbixFilters
+): ComparativeMetricsResult | null {
+  if (!activeFilters.comparisonEnabled) return null;
+
+  let compFrom: Date | null = null;
+  let compTo: Date | null = null;
+  let label = 'Período Comparativo';
+
+  if (activeFilters.comparisonPreset === 'previous_month') {
+    const baseDate = activeFilters.dateFrom ? new Date(activeFilters.dateFrom) : new Date();
+    compFrom = new Date(baseDate.getFullYear(), baseDate.getMonth() - 1, 1, 0, 0, 0);
+    compTo = new Date(baseDate.getFullYear(), baseDate.getMonth(), 0, 23, 59, 59);
+    label = `Mês Anterior (${compFrom.toLocaleDateString('pt-BR')} a ${compTo.toLocaleDateString('pt-BR')})`;
+  } else if (activeFilters.comparisonPreset === 'previous_period' && activeFilters.dateFrom && activeFilters.dateTo) {
+    const curFrom = new Date(activeFilters.dateFrom).getTime();
+    const curTo = new Date(activeFilters.dateTo).getTime();
+    const durationMs = curTo - curFrom;
+    compTo = new Date(curFrom - 1000);
+    compFrom = new Date(curFrom - durationMs);
+    label = `Período Homólogo (${compFrom.toLocaleDateString('pt-BR')} a ${compTo.toLocaleDateString('pt-BR')})`;
+  } else if (activeFilters.comparisonDateFrom && activeFilters.comparisonDateTo) {
+    compFrom = new Date(activeFilters.comparisonDateFrom);
+    compTo = new Date(activeFilters.comparisonDateTo);
+    label = `Custom (${compFrom.toLocaleDateString('pt-BR')} a ${compTo.toLocaleDateString('pt-BR')})`;
+  } else {
+    return null;
+  }
+
+  // Eventos do período atual
+  const baselineEvents = filterEvents(rawEvents, activeFilters);
+  const baselineKpis = computeKPIs(baselineEvents);
+
+  // Filtra eventos comparativos aplicando os mesmos filtros de host/severidade/trigger/tag, mas com as datas comparativas
+  const compFilters: ZabbixFilters = {
+    ...activeFilters,
+    dateFrom: compFrom.toISOString().slice(0, 16),
+    dateTo: compTo.toISOString().slice(0, 16),
+    comparisonEnabled: false,
+  };
+  const compEvents = filterEvents(rawEvents, compFilters);
+  const comparisonKpis = computeKPIs(compEvents);
+
+  const mttrDeltaSeconds = baselineKpis.mttrSegundos - comparisonKpis.mttrSegundos;
+  const mttrDeltaPct = comparisonKpis.mttrSegundos > 0
+    ? Math.round(((baselineKpis.mttrSegundos - comparisonKpis.mttrSegundos) / comparisonKpis.mttrSegundos) * 100)
+    : 0;
+
+  const mtbfDeltaSeconds = baselineKpis.mtbfSegundosGlobal - comparisonKpis.mtbfSegundosGlobal;
+  const mtbfDeltaPct = comparisonKpis.mtbfSegundosGlobal > 0
+    ? Math.round(((baselineKpis.mtbfSegundosGlobal - comparisonKpis.mtbfSegundosGlobal) / comparisonKpis.mtbfSegundosGlobal) * 100)
+    : 0;
+
+  const volumeDeltaCount = baselineKpis.totalEventos - comparisonKpis.totalEventos;
+  const volumeDeltaPct = comparisonKpis.totalEventos > 0
+    ? Math.round(((baselineKpis.totalEventos - comparisonKpis.totalEventos) / comparisonKpis.totalEventos) * 100)
+    : 0;
+
+  const noiseDeltaCount = baselineKpis.totalRuidoOperacional - comparisonKpis.totalRuidoOperacional;
+  const noiseDeltaPct = comparisonKpis.totalRuidoOperacional > 0
+    ? Math.round(((baselineKpis.totalRuidoOperacional - comparisonKpis.totalRuidoOperacional) / comparisonKpis.totalRuidoOperacional) * 100)
+    : 0;
+
+  return {
+    hasComparison: true,
+    baselineKpis,
+    comparisonKpis,
+    comparisonPeriodLabel: label,
+    mttrDeltaSeconds,
+    mttrDeltaPct,
+    mtbfDeltaSeconds,
+    mtbfDeltaPct,
+    volumeDeltaCount,
+    volumeDeltaPct,
+    noiseDeltaCount,
+    noiseDeltaPct,
+  };
+}
+

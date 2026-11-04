@@ -7,8 +7,10 @@ const STORAGE_SESSIONS_KEY = 'zabbix_saved_sessions';
  * Revitaliza objetos Date após desserialização JSON
  */
 function reviveEvents(events: ZabbixEvent[]): ZabbixEvent[] {
-  return events.map((e) => ({
+  return events.map((e: any) => ({
     ...e,
+    host: typeof e.host === 'object' && e.host !== null ? (e.host.host || String(e.host)) : String(e.host || 'Host Desconhecido'),
+    incidente: typeof e.incidente === 'object' && e.incidente !== null ? (e.incidente.trigger || e.incidente.name || String(e.incidente)) : String(e.incidente || 'Incidente sem descrição'),
     dataInicio: e.dataInicio ? new Date(e.dataInicio) : null,
     dataFim: e.dataFim ? new Date(e.dataFim) : null,
   }));

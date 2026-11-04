@@ -1,0 +1,476 @@
+Entendido. Ajuste simples e direto no template do relatório PDF. Abaixo está a instrução revisada com a alteração aplicada, pronta para ser colada no Google AI Studio.
+
+---
+
+# Instrução Completa para o Google AI Studio — Evolução da Aplicação "Zabbix Analyzer" para Plataforma SaaS Multi-Tenant com IA
+
+## 0. Contexto e Objetivo
+
+Você vai evoluir a aplicação web anterior ("Análise Zabbix", client-side puro) para uma **plataforma SaaS profissional de análise e tuning de triggers do Zabbix**, com:
+
+1. **Autenticação e multi-tenant** (login, criação de conta, cadastro de clientes).
+2. **Integração com a API do DeepSeek** (configurável) para gerar **diagnósticos e recomendações de tuning** com base nos dados importados.
+3. **Geração de Relatório Técnico em PDF** seguindo o padrão visual e estrutural do arquivo `Relatorio_Tuning_Triggers_Zabbix.pdf` (recorte Outubro/2026), com **branding personalizável** (empresa emissora + empresa contratante).
+4. **Personalização white-label**: nome, logo, responsável técnico, cores da empresa emissora e nome/logo da empresa contratante.
+
+**Entregável:** Um arquivo `index.html` autocontido (HTML + CSS + JS em um único arquivo), pronto para rodar no navegador, com todas as funcionalidades abaixo. Use **React 18 via CDN + Babel Standalone** ou **Vanilla JS ES6+** — o que for mais robusto para um único arquivo. Prefira **Vanilla JS com módulos** para evitar overhead de Babel.
+
+---
+
+## 1. Stack Técnica (tudo via CDN)
+
+| Finalidade | Biblioteca | CDN |
+|---|---|---|
+| Parsing Excel | SheetJS (xlsx) | `https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js` |
+| Gráficos | Chart.js v4 | `https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js` |
+| Datas/Durações | date-fns | `https://cdn.jsdelivr.net/npm/date-fns@3.6.0/cdn.min.js` |
+| PDF | jsPDF + html2canvas | `https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js` + `https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js` |
+| Ícones | Lucide | `https://unpkg.com/lucide@latest` |
+| Hash de senha | Web Crypto API (nativo) | — |
+| Persistência | localStorage (JSON) | — |
+
+**Sem backend.** Todos os dados ficam no `localStorage` do navegador. A chamada à API DeepSeek é feita diretamente do frontend via `fetch` (CORS: a API DeepSeek aceita chamadas de navegador com a chave do usuário; alertar o usuário sobre exposição da chave e sugerir uso restrito).
+
+---
+
+## 2. Modelo de Dados (localStorage)
+
+Use um único objeto raiz `zabbixAnalyzerDB` com a seguinte estrutura. Faça migrations simples (versão) para evolução.
+
+```js
+{
+  version: 1,
+  users: [
+    {
+      id: "uuid",
+      email: "user@empresa.com",
+      passwordHash: "sha256-hex",          // Web Crypto SHA-256
+      name: "Nome do Usuário",
+      role: "admin" | "analyst",
+      createdAt: "ISO8601"
+    }
+  ],
+  session: { userId: "uuid", token: "uuid", expiresAt: "ISO8601" }, // token simples
+  companies: [                             // "Empresa emissora" (quem usa a plataforma)
+    {
+      id: "uuid",
+      name: "Petros",
+      logoDataUrl: "data:image/png;base64,...", // upload convertido
+      primaryColor: "#0f172a",
+      accentColor: "#3b82f6",
+      technicalResponsible: "Engenheiro Sênior de Observabilidade",
+      address: "",
+      document: ""                          // CNPJ opcional
+    }
+  ],
+  clients: [                               // "Empresa contratante" (quem recebe o relatório)
+    {
+      id: "uuid",
+      companyId: "uuid",                   // vínculo com a empresa emissora
+      name: "Cliente X",
+      logoDataUrl: "data:image/png;base64,...",
+      contactName: "",
+      contactEmail: "",
+      createdAt: "ISO8601"
+    }
+  ],
+  deepseekConfig: {
+    apiKey: "",
+    baseUrl: "https://api.deepseek.com/v1",
+    model: "deepseek-chat",                // ou deepseek-reasoner
+    temperature: 0.3,
+    maxTokens: 4096,
+    systemPromptExtra: ""                  // prompt adicional customizável
+  },
+  reports: [                               // histórico de relatórios gerados
+    {
+      id: "uuid",
+      companyId: "uuid",
+      clientId: "uuid",
+      createdAt: "ISO8601",
+      periodStart: "ISO8601",
+      periodEnd: "ISO8601",
+      fileName: "relatorio.xlsx",
+      kpis: { totalEvents, shortDurationPct, ackRatePct, mttrSec, mtbfSec, topHost },
+      triggersAnalysis: [...],             // resultado do DeepSeek estruturado
+      narrative: { diagnosis, recommendations, ... },
+      pdfGenerated: true
+    }
+  ],
+  preferences: { theme: "dark" | "light", visibleCharts: [...], timelineBucket: "15min" }
+}
+```
+
+**Seed inicial:** na primeira execução, criar um usuário admin `admin@local / admin123` (com hash) e uma empresa "Minha Empresa" com cores padrão, para permitir login imediato e demonstração.
+
+---
+
+## 3. Autenticação e Fluxos
+
+### 3.1 Telas (rotas por hash: `#/login`, `#/signup`, `#/app`, `#/clients`, `#/settings`, `#/reports`, `#/report/:id`)
+
+**Tela de Login (`#/login`):**
+- Email + senha (mostrar/ocultar).
+- Botão "Entrar".
+- Link "Criar conta".
+- Validação: comparar `sha256(senha)` com `passwordHash`.
+- Ao logar, criar `session` com `expiresAt = agora + 8h`, redirecionar para `#/app`.
+- Persistir sessão no `localStorage`; validar expiração a cada navegação.
+
+**Tela de Cadastro (`#/signup`):**
+- Nome completo, email, senha, confirmar senha.
+- Ao cadastrar: criar usuário (role `admin` se for o primeiro), criar sessão, criar empresa "Minha Empresa" automaticamente se não existir, redirecionar para `#/onboarding` (tela de configuração inicial da empresa) → depois `#/app`.
+
+**Proteção de rotas:** todas as rotas `#/app`, `#/clients`, `#/settings`, `#/reports` redirecionam para `#/login` se não houver sessão válida.
+
+**Logout:** botão no header, limpa sessão.
+
+### 3.2 Onboarding Inicial (após primeiro cadastro)
+
+Wizard de 3 passos (modal ou tela):
+1. **Empresa Emissora:** nome, upload de logo (converter para base64, exibir preview), cor primária, responsável técnico.
+2. **Empresa Contratante (Cliente):** nome, upload de logo, contato. (Pode pular e cadastrar depois em `#/clients`.)
+3. **API DeepSeek:** campo de API Key, URL base, modelo, botão **"Testar conexão"** (faz `fetch` a `/models` ou a um `/chat/completions` mínimo). Exibir resultado (sucesso/erro).
+
+Ao final, redirecionar para `#/app`.
+
+---
+
+## 4. Tela Principal (`#/app`) — Análise dos Dados
+
+Reaproveite **toda a funcionalidade da versão anterior** (upload .xlsx, parsing das 12 colunas, filtros de período/severidade/host/trigger/status/reconhecido/etiquetas, 8 gráficos, tabela virtualizada, KPIs, exportação CSV, dados de exemplo). Adicione:
+
+### 4.1 Header Superior
+- Logo da **empresa emissora** + nome.
+- Seletor de **Cliente** (dropdown "Empresa contratante").
+- Botão **"Gerar Relatório"** (só habilitado se dados carregados + cliente selecionado + API DeepSeek configurada).
+- Ícones: `Configurações`, `Clientes`, `Histórico de Relatórios`, `Logout`.
+- Badge com nome do usuário logado.
+
+### 4.2 KPIs (cards) — mesmos da versão anterior + 2 novos
+- Total de Eventos, Incidentes em Aberto, Duração Total, Duração Média, Host Mais Afetado, Trigger Mais Frequente, MTTR, **% Curta Duração (<5min)**, **Taxa de Reconhecimento**.
+
+### 4.3 Seção de Diagnóstico por IA (Novo)
+
+Abaixo dos KPIs, um painel "**Análise Inteligente (DeepSeek)**" com:
+- Botão **"Analisar com IA"**.
+- Ao clicar: agrega os dados filtrados em um resumo estruturado (ver seção 5.2), envia à API DeepSeek, exibe **skeleton loader** e renderiza a resposta em Markdown (usar `marked` via CDN: `https://cdn.jsdelivr.net/npm/marked/marked.min.js`).
+- Botão **"Regenerar"** e **"Ajustar prompt"** (abre modal com textarea para instruções adicionais, salvas em `deepseekConfig.systemPromptExtra`).
+- Cache do último resultado por `hash(filtros + dataset)` para evitar chamadas repetidas; invalidar ao mudar filtros.
+
+---
+
+## 5. Integração com a API DeepSeek
+
+### 5.1 Chamada (fetch)
+
+```js
+async function callDeepSeek(messages, config) {
+  const res = await fetch(`${config.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.apiKey}`
+    },
+    body: JSON.stringify({
+      model: config.model,
+      temperature: config.temperature,
+      max_tokens: config.maxTokens,
+      messages
+    })
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return data.choices[0].message.content;
+}
+```
+
+- Tratar erros: 401 (chave inválida), 429 (rate limit), timeout (usar `AbortController` com 90s).
+- Exibir toasts de erro amigáveis.
+
+### 5.2 Montagem do Prompt (system + user)
+
+**System prompt (fixo):**
+```
+Você é um engenheiro sênior de observabilidade e especialista em Zabbix (versões 6.x e 7.x).
+Sua tarefa é analisar um recorte de eventos exportado do Zabbix e produzir um
+diagnóstico técnico estruturado e recomendações de engenharia de triggers,
+no mesmo padrão do relatório "Tuning de Triggers Zabbix" (recorte Outubro/2026).
+
+Regras:
+- Seja objetivo, técnico e em português do Brasil.
+- Identifique as triggers ruidosas (alta ocorrência + baixa duração ou baixo reconhecimento).
+- Para cada trigger, explique a CAUSA RAIZ FÍSICA/LÓGICA e proponha uma EXPRESSÃO OTIMIZADA
+  em sintaxe Zabbix (use min(), max(), avg(), nodata(), count() — evite last()).
+- Proponha HISTERESE (Problem vs Recovery) com janelas de tempo explícitas.
+- Sugira HIERARQUIA DE DEPENDÊNCIAS (host unreachable → agent → triggers dependentes).
+- Padronize TAGS DE GOVERNANÇA (scope, team, criticality, environment).
+- Forneça PASSO A PASSO de configuração no frontend do Zabbix.
+- Formate a saída em Markdown, com títulos e tabelas.
+- Nunca invente dados; baseie-se apenas no resumo fornecido.
+```
+
+**User prompt (montado dinamicamente):**
+```
+Resumo do recorte analisado (período {inicio} a {fim}):
+
+KPIs:
+- Total de eventos: {n}
+- % eventos < 5min: {pct}%
+- Taxa de reconhecimento: {pct}%
+- MTTR médio: {mttr}
+- MTBF: {mtbf}
+- Host mais afetado: {host} ({nHost} eventos, {pctHost}% do escopo)
+
+Top 10 triggers ruidosas (ocorrências | duração média | severidade | % reconhecidas | hosts afetados):
+| Trigger | Ocorr. | Dur. média | Severidade | % Reconh. | Hosts |
+|---|---|---|---|---|---|
+{linhas}
+
+Distribuição por severidade: {json}
+Distribuição por host (top 10): {json}
+Eventos em aberto (status=INCIDENTE): {json}
+
+{systemPromptExtra do usuário, se houver}
+
+Produza:
+1. Diagnóstico do recorte (parágrafo executivo com números).
+2. Tabela "Diagnóstico das Triggers Ruidosas" com: Trigger | Ocorr. | Duração | Severidade | Causa raiz física/lógica.
+3. Seção "Engenharia de Expressões Otimizadas & Histerese" com blocos de código para as 5 triggers mais ruidosas.
+4. "Hierarquia de Dependências & Supressão" (árvore textual).
+5. "Padronização de Tags de Governança" (tabela TAG KEY | VALORES | OBJETIVO).
+6. "Passo a Passo Prático de Configuração no Frontend" (3 a 5 passos numerados).
+```
+
+### 5.3 Parser da Resposta
+
+A resposta vem em Markdown. Renderize com `marked.parse()`. Para o PDF, você **não** precisa parsear em JSON: renderize o HTML gerado pelo `marked` diretamente no template do relatório (seção 6). Porém, para o histórico (`reports`), salve também `narrative: { markdown: string, html: string }`.
+
+**Fallback:** se a API falhar ou não estiver configurada, exiba um alerta e permita gerar o relatório **apenas com os dados quantitativos** (KPIs + tabelas + gráficos), sem a seção de IA, marcando "Análise de IA indisponível".
+
+---
+
+## 6. Geração do Relatório PDF (Padrão do PDF de Referência)
+
+O relatório deve **seguir fielmente a estrutura e o estilo** do arquivo `Relatorio_Tuning_Triggers_Zabbix.pdf` fornecido, com branding do cliente. Use **jsPDF** para montar o PDF programaticamente (mais controle) ou **html2canvas + jsPDF** a partir de um container HTML estilizado. **Recomendação: HTML → html2canvas → jsPDF** (mais fácil de estilizar e manter o padrão visual).
+
+### 6.1 Template Visual (HTML oculto `#report-template`)
+
+Crie um container `div#report-template` (posicionado `position: fixed; left: -9999px; width: 794px;` — largura A4 a 96dpi) com as páginas abaixo. Use CSS custom properties com as cores da empresa emissora (`--primary`, `--accent`).
+
+**Capa (Página 1):**
+```
+┌─────────────────────────────────────────────┐
+│  [LOGO EMISSOR]              [LOGO CLIENTE] │
+│                                             │
+│  ENGENHARIA & TUNING DE TRIGGERS            │
+│  Relatório Técnico Zabbix Analyzer          │
+│  Recorte {MM/YYYY} ({dd/MM} a {dd/MM})      │
+│                                             │
+│  ─────────────────────────────────────      │
+│  Emitido por: {Empresa Emissora}            │
+│  Responsável técnico: {nome}                │
+│  Preparado para: {Empresa Contratante}      │
+│  Data de emissão: {dd/MM/yyyy}              │
+│  ─────────────────────────────────────      │
+│                                             │
+│  NOC {Empresa Emissora} / OBSERVABILIDADE   │
+└─────────────────────────────────────────────┘
+```
+
+**Página 2 — Sumário Executivo (KPIs em destaque):**
+- 4 a 6 "cards" grandes com: **% Alarmes Curta Duração** (ex: `95% — 4.898 de 5.166 (<5 min)`), **Taxa de Reconhecimento** (ex: `3% — Fadiga Severa de Alertas`), **MTTR Médio** (ex: `46s — Oscilação Instantânea`), **MTBF** (ex: `4m 43s — Recorrência Elevada`).
+- Parágrafo "Diagnóstico do Recorte" (gerado pela IA ou por template determinístico se IA indisponível).
+- Layout com cards lado a lado, fundo levemente colorido, tipografia grande.
+
+**Página 3 — "1. Diagnóstico das Triggers Ruidosas do Escopo":**
+- Tabela com colunas: `Trigger Problemática | Ocorr. | Duração | Severidade | Causa Raiz Física/Lógica`.
+- Linhas zebradas; badges coloridos de severidade.
+- Dados: top 5–7 triggers mais ruidosas dos dados filtrados + causa raiz vinda do texto da IA (ou "—" se indisponível).
+
+**Página 4 — "2. Engenharia de Expressões Otimizadas & Histerese (Zabbix 6.x / 7.x)":**
+- Para cada uma das 5 principais triggers: um bloco com título numerado, tag de contexto (ex: "Instâncias Oracle (8 hosts)"), rótulo "PROBLEM EXPRESSION" e bloco de código monoespaçado com fundo escuro (`#0f172a`) e texto claro, rótulo "RECOVERY EXPRESSION" e bloco similar.
+- Fonte monoespaçada (`JetBrains Mono` ou `Courier New`), quebra de linha automática.
+
+**Página 5 — "3. Hierarquia de Dependências & Supressão":**
+- Árvore textual indentada com caixas (usar `<ul>` estilizado com bordas coloridas).
+- Exemplo do PDF:
+  ```
+  [Host Unreachable (ICMP Ping)] (Nível Root)
+    [Zabbix Agent / Connectivity Unreachable]
+      [Oracle Data Collection / REDO Logs Triggers]
+      [WC_Portlet Heap 90%] (Severidade Alta)
+        [WC_Portlet Heap 80%] (Ocultada se 90% estiver ativa)
+      [TCP Port 3389 RDP MITRA]
+  ```
+
+**Página 6 — "4. Padronização de Tags de Governança":**
+- Tabela `TAG KEY | VALORES PADRONIZADOS | OBJETIVO NO ZABBIX ANALYZER / GRAFANA`.
+- Conteúdo fixo do PDF (scope, team, criticality, environment).
+
+**Página 7 — "5. Passo a Passo Prático de Configuração no Frontend":**
+- 3 a 5 passos numerados, cada um com círculo numerado, título em negrito e parágrafo explicativo.
+- Conteúdo gerado pela IA (ou fallback estático).
+
+**Rodapé em todas as páginas:** `{Empresa Emissora} — Relatório Técnico Zabbix Analyzer — Página X de Y` + data.
+
+**Página final — Aprovação:**
+```
+Aprovação Técnica: {Responsável Técnico} / Especialista Zabbix
+Status: Pronto para Homologação e Aplicação
+Data: {dd/MM/yyyy}
+[Assinatura digital: hash SHA-256 do conteúdo exibido em fonte pequena]
+```
+
+### 6.2 Fluxo de Geração
+
+1. Usuário clica **"Gerar Relatório"** no header.
+2. Modal de confirmação: cliente selecionado, período (usa o filtro atual ou permite escolher), checkbox "Incluir análise de IA (DeepSeek)".
+3. Se IA marcada: chama DeepSeek (loader "Analisando com IA...").
+4. Preenche `#report-template` com dados (branding do cliente, KPIs, tabelas, respostas da IA).
+5. Renderiza cada `.report-page` com `html2canvas` (scale 2) e adiciona ao PDF com `jsPDF` (A4 portrait).
+6. Salva o arquivo `Relatorio_Tuning_Triggers_{Cliente}_{YYYY-MM}.pdf`.
+7. Salva o registro em `zabbixAnalyzerDB.reports` (sem os dados brutos, apenas KPIs e narrativa) e redireciona para `#/reports/:id` (visualização do histórico).
+
+### 6.3 Fallback Determinístico (sem IA)
+
+Se a IA não estiver configurada ou falhar:
+- Use textos template para "Diagnóstico", "Causa Raiz" (ex: "Timeout momentâneo — verificar item/poller"), "Expressões" (sugestões padrão de histerese genéricas) e "Passo a Passo" (texto estático do PDF de referência, adaptado).
+- Marque no relatório: *"Análise qualitativa gerada por template (IA indisponível)."*
+
+---
+
+## 7. Telas de Gestão
+
+### 7.1 `#/clients` — Cadastro de Clientes (Empresas Contratantes)
+
+- Lista em cards com logo, nome, contato, nº de relatórios gerados.
+- Botão **"Novo Cliente"** → modal: nome, upload de logo (preview + botão remover), nome do contato, email, telefone, observações.
+- Editar e excluir (confirmação).
+- Busca por nome.
+- Cada cliente pertence à empresa emissora logada (`companyId`).
+
+### 7.2 `#/settings` — Configurações
+
+Abas:
+- **Empresa Emissora:** nome, logo (upload/preview/remover), cor primária, cor de destaque, responsável técnico, CNPJ, endereço. Botão "Salvar".
+- **API DeepSeek:** API Key (campo password com botão "mostrar"), URL base, modelo (dropdown `deepseek-chat` / `deepseek-reasoner` / custom), temperature (slider 0–1), max tokens, prompt extra (textarea), botão **"Testar Conexão"** (faz uma chamada mínima e exibe latência + resposta), botão "Salvar".
+- **Aparência:** tema claro/escuro, gráficos visíveis (checkboxes), bucket da timeline.
+- **Conta:** alterar nome, email, senha (com confirmação da senha atual).
+- **Dados:** exportar `zabbixAnalyzerDB` como JSON; importar JSON (com merge/validação); "Resetar dados" (com confirmação dupla).
+
+### 7.3 `#/reports` — Histórico de Relatórios
+
+- Lista em tabela/cards: data, cliente, período, KPIs resumidos, botão "Abrir" (`#/reports/:id`) e "Baixar PDF" (se salvo em IndexedDB — ver nota).
+- **Nota sobre PDFs:** `localStorage` tem limite ~5MB. Salvar o PDF em **IndexedDB** (usar `idb-keyval` via CDN: `https://cdn.jsdelivr.net/npm/idb-keyval@6/dist/umd.js`), chave `report:{id}`, valor Blob. Se não couber, oferecer download imediato e não persistir.
+
+### 7.4 `#/reports/:id` — Visualização
+
+- Renderiza o mesmo template do relatório (HTML) em tela, com botão "Baixar PDF novamente" e "Regenerar com IA".
+
+---
+
+## 8. Requisitos de UX/UI
+
+- **Design system:** dark mode padrão; paleta base `#0f172a` (fundo), `#1e293b` (cards), `#3b82f6` (accent), `#e2e8f0` (texto). Cores da empresa emissora sobrescrevem `--primary`/`--accent`.
+- **Tipografia:** `Inter` (Google Fonts) para UI; `JetBrains Mono` para blocos de código.
+- **Responsivo:** desktop-first; em < 1024px, sidebar de filtros vira drawer.
+- **Feedback:** toasts (sucesso/erro/info), skeletons, spinners, confirmações em ações destrutivas.
+- **Acessibilidade:** labels associadas, contraste AA, navegação por teclado.
+- **Segurança:** nunca exibir a API Key completa (mascarar `sk-•••••`); aviso no campo de que a chave fica no navegador.
+- **Empty states:** mensagens claras em cada tela sem dados.
+
+---
+
+## 9. Estrutura de Código (dentro do `index.html`)
+
+Organize o `<script type="module">` em seções comentadas:
+
+```
+// ============ 1. CONSTANTES E CONFIG ============
+// ============ 2. BANCO (localStorage) ============
+// ============ 3. AUTENTICAÇÃO (hash, sessão) ============
+// ============ 4. ROTEADOR (hash-based) ============
+// ============ 5. PARSING EXCEL (SheetJS) ============
+// ============ 6. NORMALIZAÇÃO (datas, durações, tags) ============
+// ============ 7. FILTROS E AGREGAÇÕES ============
+// ============ 8. KPIs ============
+// ============ 9. GRÁFICOS (Chart.js) ============
+// ============ 10. TABELA VIRTUALIZADA ============
+// ============ 11. DEEPSEEK (prompt, fetch, parser) ============
+// ============ 12. RELATÓRIO PDF (template + html2canvas + jsPDF) ============
+// ============ 13. TELAS (login, signup, app, clients, settings, reports) ============
+// ============ 14. COMPONENTES UI (modal, toast, dropdown) ============
+// ============ 15. BOOTSTRAP (seed, restore session, rotear) ============
+```
+
+Cada seção com comentário em português explicando o propósito.
+
+---
+
+## 10. Critérios de Aceite (Checklist de Entrega)
+
+### Autenticação e Multi-tenant
+- [ ] Login funcional com hash SHA-256 (Web Crypto) e sessão de 8h.
+- [ ] Cadastro cria usuário + empresa emissora padrão + onboarding.
+- [ ] Rotas protegidas redirecionam para login.
+- [ ] Logout limpa sessão.
+- [ ] Seed: `admin@local / admin123` + empresa "Minha Empresa".
+
+### Cadastro de Clientes
+- [ ] CRUD de clientes com upload de logo (base64, preview, remover).
+- [ ] Cliente vinculado à empresa emissora.
+- [ ] Seletor de cliente no header da tela principal.
+
+### Personalização (White-label)
+- [ ] Empresa emissora: nome, logo, cores, responsável técnico configuráveis.
+- [ ] Empresa contratante: nome e logo aparecem no PDF gerado.
+- [ ] Cores da empresa emissora aplicadas ao relatório PDF.
+- [ ] Rodapé da capa exibe **"NOC {Empresa Emissora} / OBSERVABILIDADE"** com o nome da empresa emissora dinamicamente substituído.
+
+### Integração DeepSeek
+- [ ] Campos configuráveis: API Key, base URL, modelo, temperature, max tokens, prompt extra.
+- [ ] Botão "Testar Conexão" com feedback.
+- [ ] Botão "Analisar com IA" na tela principal, com prompt estruturado (seção 5.2) e renderização Markdown.
+- [ ] Tratamento de erros (401, 429, timeout) com toasts.
+- [ ] Cache do último resultado por hash de filtros + dataset.
+
+### Relatório PDF (Padrão do PDF de referência)
+- [ ] Capa com logos e nomes das duas empresas.
+- [ ] **Rodapé da capa exibindo "NOC {Empresa Emissora} / OBSERVABILIDADE"** (substituindo "SRE / OBSERVABILIDADE" do PDF original).
+- [ ] Sumário executivo com 4 cards de KPI (Curta Duração, Reconhecimento, MTTR, MTBF).
+- [ ] Parágrafo "Diagnóstico do Recorte".
+- [ ] Seção 1 — Tabela de Triggers Ruidosas (com causa raiz da IA).
+- [ ] Seção 2 — Blocos de código monoespaçado com Problem/Recovery Expressions (5 triggers).
+- [ ] Seção 3 — Árvore de Hierarquia de Dependências.
+- [ ] Seção 4 — Tabela de Padronização de Tags de Governança.
+- [ ] Seção 5 — Passo a Passo de Configuração (numerado).
+- [ ] Página de Aprovação Técnica com responsável e hash.
+- [ ] Rodapé em todas as páginas com paginação e empresa.
+- [ ] Fallback determinístico se IA indisponível.
+
+### Histórico
+- [ ] Lista de relatórios gerados com cliente, período e KPIs.
+- [ ] Abrir relatório em tela e baixar PDF novamente (IndexedDB).
+- [ ] Exclusão de relatório com confirmação.
+
+### Configurações
+- [ ] Aba Empresa (emissora), API DeepSeek, Aparência, Conta, Dados.
+- [ ] Exportar/Importar/Resetar banco JSON.
+
+### Gerais
+- [ ] Um único `index.html` autocontido, comentado em pt-BR.
+- [ ] Funciona offline (exceto chamadas à API DeepSeek).
+- [ ] Dados de exemplo embutidos + botão "Carregar dados de exemplo".
+- [ ] Responsivo e acessível.
+- [ ] Tema claro/escuro persistido.
+
+---
+
+## 11. Prompt de Bootstrap para a IA (Copie e cole)
+
+> "Gere o arquivo `index.html` completo, autocontido, da aplicação **Zabbix Analyzer SaaS**, seguindo rigorosamente as instruções acima. Inclua CSS no `<style>`, JS em `<script type="module">` e todas as bibliotecas via CDN. O arquivo deve abrir diretamente no navegador, permitir login imediato com `admin@local / admin123`, exibir a tela principal com upload de Excel, filtros, KPIs, 8 gráficos, tabela, integração configurável com a API DeepSeek para geração de diagnóstico, e geração de Relatório PDF no padrão visual do `Relatorio_Tuning_Triggers_Zabbix.pdf` (capa com logos das duas empresas, rodapé da capa como **'NOC {Empresa Emissora} / OBSERVABILIDADE'**, sumário executivo com 4 KPIs, tabela de triggers ruidosas, blocos de código Problem/Recovery, árvore de dependências, tabela de tags, passo a passo e página de aprovação). Tudo em português do Brasil, com comentários no código, tratamento de erros, empty states, toasts e persistência em `localStorage` (+ IndexedDB para PDFs). Entregue apenas o código final, pronto para uso."
+
+---
+
+**Entregável final:** `index.html` único, funcional, comentado, aderente a todos os critérios de aceite, com o padrão visual do PDF de referência e as funcionalidades SaaS solicitadas, incluindo a substituição de **"SRE / OBSERVABILIDADE"** por **"NOC {Empresa Emissora} / OBSERVABILIDADE"** na capa do relatório.
