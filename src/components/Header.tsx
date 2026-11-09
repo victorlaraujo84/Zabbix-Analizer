@@ -4,7 +4,6 @@ import {
   Sun,
   Moon,
   SlidersHorizontal,
-  BarChart3,
   RotateCcw,
   FolderArchive,
   FileDown,
@@ -19,7 +18,7 @@ import {
   ShieldCheck,
   Presentation,
 } from 'lucide-react';
-import { SaaSCompany, SaaSClient, SaaSUser } from '../utils/saasDB';
+import { SaaSClient, SaaSUser } from '../utils/saasDB';
 
 interface HeaderProps {
   theme: 'light' | 'dark';
@@ -36,12 +35,10 @@ interface HeaderProps {
   totalRaw: number;
   savedSessionsCount: number;
   // SaaS props
-  company?: SaaSCompany;
   currentUser?: SaaSUser | null;
   clients?: SaaSClient[];
   selectedClientId?: string;
   onSelectClient?: (clientId: string) => void;
-  activeRoute?: string;
   onNavigate?: (route: string) => void;
   onLogout?: () => void;
 }
@@ -60,113 +57,18 @@ export const Header: React.FC<HeaderProps> = ({
   totalFiltered,
   totalRaw,
   savedSessionsCount,
-  company,
   currentUser,
   clients = [],
   selectedClientId = '',
   onSelectClient,
-  activeRoute = '#/app',
   onNavigate,
   onLogout,
 }) => {
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
 
   return (
-    <header className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-3 px-4 sm:px-6 py-2.5 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 transition-colors">
-      {/* Zona 1: Logo & Marca White-label & Navegação de Rotas */}
-      <div className="flex items-center gap-4 shrink-0">
-        <div
-          onClick={() => onNavigate && onNavigate('#/app')}
-          className="flex items-center gap-2.5 cursor-pointer"
-        >
-          {company?.logoDataUrl ? (
-            <img
-              src={company.logoDataUrl}
-              alt={company.name}
-              className="w-8 h-8 object-contain rounded-lg border border-slate-200 dark:border-slate-700 bg-white p-0.5"
-            />
-          ) : (
-            <div className="w-8 h-8 rounded-lg bg-red-600 flex items-center justify-center text-white font-bold shadow-xs">
-              <BarChart3 className="w-4 h-4" />
-            </div>
-          )}
-          <div className="flex flex-col leading-tight">
-            <span className="text-sm font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-1.5">
-              <span>{company?.name || 'Zabbix Analyzer'}</span>
-              <span className="text-[10px] px-1.5 py-0.2 rounded font-mono font-normal bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
-                SaaS
-              </span>
-            </span>
-            <span className="text-[10px] font-medium text-slate-400 dark:text-slate-500">
-              Observabilidade &amp; Tuning
-            </span>
-          </div>
-        </div>
-
-        {/* Links de navegação SaaS */}
-        {onNavigate && (
-          <nav className="hidden md:flex items-center gap-1 pl-3 border-l border-slate-200 dark:border-slate-800 text-xs font-semibold">
-            <button
-              onClick={() => onNavigate('#/app')}
-              className={`px-2.5 py-1.5 rounded-md transition-colors cursor-pointer ${
-                activeRoute === '#/app'
-                  ? 'bg-slate-100 dark:bg-slate-800 text-blue-600 dark:text-blue-400'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              Dashboard
-            </button>
-
-            <button
-              onClick={() => onNavigate('#/clients')}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer ${
-                activeRoute === '#/clients'
-                  ? 'bg-slate-100 dark:bg-slate-800 text-blue-600 dark:text-blue-400'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              <Building2 className="w-3.5 h-3.5 text-blue-500" />
-              <span>Clientes</span>
-            </button>
-
-            <button
-              onClick={() => onNavigate('#/trigger-factory')}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer ${
-                activeRoute === '#/trigger-factory'
-                  ? 'bg-slate-100 dark:bg-slate-800 text-amber-600 dark:text-amber-400 font-bold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              <Wrench className="w-3.5 h-3.5 text-amber-500" />
-              <span>Fábrica de Triggers</span>
-            </button>
-
-            <button
-              onClick={() => onNavigate('#/reports')}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer ${
-                activeRoute === '#/reports'
-                  ? 'bg-slate-100 dark:bg-slate-800 text-amber-600 dark:text-amber-400'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              <FileText className="w-3.5 h-3.5 text-amber-500" />
-              <span>Relatórios</span>
-            </button>
-
-            <button
-              onClick={() => onNavigate('#/settings')}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer ${
-                activeRoute === '#/settings'
-                  ? 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              <Settings className="w-3.5 h-3.5 text-slate-500" />
-              <span>Configurações</span>
-            </button>
-          </nav>
-        )}
-      </div>
+    <header className="solor-topbar sticky top-0 z-30 flex flex-wrap items-center justify-between gap-3 px-4 sm:px-6 py-2.5 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 transition-colors">
+      <p className="text-sm font-semibold text-slate-900 dark:text-white">Dashboard</p>
 
       {/* Zona 2: Contexto do Cliente Selecionado & Status */}
       <div className="flex items-center gap-3 text-xs font-medium text-slate-500 dark:text-slate-400">
@@ -211,7 +113,7 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       {/* Zona 3: Ações do Dashboard & Perfil */}
-      <div className="flex items-center gap-2 shrink-0">
+      <div className="flex flex-wrap items-center gap-2">
         {/* Botão de Histórico de Sessões Salvas */}
         <button
           onClick={onOpenSessions}
@@ -275,7 +177,7 @@ export const Header: React.FC<HeaderProps> = ({
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900 border border-blue-200 dark:border-blue-800 transition-colors cursor-pointer"
           >
             <Wrench className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">Fábrica de Triggers</span>
+            <span className="hidden 2xl:inline">Fábrica de Triggers</span>
           </button>
         )}
 
@@ -286,7 +188,7 @@ export const Header: React.FC<HeaderProps> = ({
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900 border border-emerald-300 dark:border-emerald-800 transition-colors cursor-pointer"
           >
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-            <span className="hidden lg:inline">Validador Zabbix</span>
+            <span className="hidden xl:inline">Validador Zabbix</span>
           </button>
         )}
 
@@ -301,7 +203,8 @@ export const Header: React.FC<HeaderProps> = ({
 
         <button
           onClick={onOpenUpload}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 active:bg-red-800 rounded-lg shadow-xs transition-colors cursor-pointer"
+          aria-label={hasData ? 'Novo Arquivo' : 'Carregar Excel'}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 active:bg-blue-800 rounded-lg shadow-xs transition-colors cursor-pointer"
         >
           <Upload className="w-3.5 h-3.5" />
           <span className="hidden sm:inline">{hasData ? 'Novo Arquivo' : 'Carregar Excel'}</span>
@@ -312,6 +215,8 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="relative ml-1">
             <button
               type="button"
+              aria-label="Menu do usuário"
+              aria-expanded={isUserMenuOpen}
               onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}
               className="flex items-center gap-1.5 pl-2 pr-1.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
             >

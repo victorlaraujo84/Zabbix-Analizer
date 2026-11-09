@@ -1,0 +1,167 @@
+@theme {
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --color-blue-600: #3068b4;
+  --color-blue-700: #254e87;
+  --color-slate-50: #f6f8fb;
+  --color-slate-100: #f6f8fb;
+  --color-slate-200: #e2e9f2;
+  --color-slate-500: #566b83;
+  --color-slate-900: #132c4b;
+  --radius-xl: 14px;
+  --radius-2xl: 16px;
+}
+
+.solor-layout {
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.solor-layout[data-expanded="false"] {
+  grid-template-columns: 78px minmax(0, 1fr);
+}
+
+.solor-sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100dvh;
+  overflow-y: auto;
+  padding: 16px 12px;
+  background: linear-gradient(160deg, #203f6b, #193550);
+  color: white;
+}
+
+.solor-sidebar-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 52px;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #ffffff26;
+}
+
+.solor-brand {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 4px;
+  border-radius: 8px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.solor-brand img {
+  width: 112px;
+  height: 42px;
+  object-fit: contain;
+  padding: 3px;
+  border-radius: 6px;
+  background: white;
+}
+
+.solor-menu-toggle,
+.solor-nav-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: #ffffff16;
+}
+
+.solor-menu-toggle {
+  min-width: 44px;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.solor-navigation {
+  display: grid;
+  gap: 6px;
+}
+
+.solor-navigation a {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.solor-navigation a:hover,
+.solor-menu-toggle:hover {
+  background: #ffffff26;
+}
+
+.solor-navigation a[aria-current="page"] {
+  background: #3068b4;
+}
+
+.solor-sidebar :focus-visible {
+  outline: 2px solid white;
+  outline-offset: -2px;
+}
+
+.solor-content {
+  min-width: 0;
+}
+
+.solor-welcome {
+  margin: 0 auto;
+  max-width: 76rem;
+  padding: clamp(20px, 4vw, 42px);
+  border-radius: 22px;
+  background: linear-gradient(125deg, #254e87, #3065ad 65%, #477bc0);
+  color: white;
+}
+
+@media (min-width: 901px) {
+  .solor-layout[data-expanded="false"] .solor-brand,
+  .solor-layout[data-expanded="false"] .solor-nav-label {
+    display: none;
+  }
+
+  .solor-layout[data-expanded="false"] .solor-sidebar-heading,
+  .solor-layout[data-expanded="false"] .solor-navigation a {
+    justify-content: center;
+  }
+}
+
+@media (max-width: 900px) {
+  .solor-layout,
+  .solor-layout[data-expanded="false"] {
+    display: block;
+  }
+
+  .solor-sidebar {
+    z-index: 40;
+    height: auto;
+    padding: 6px 12px;
+  }
+
+  .solor-topbar {
+    top: 56px;
+  }
+
+  .solor-sidebar-heading {
+    min-height: 44px;
+    padding: 0;
+    margin: 0;
+    border: 0;
+  }
+
+  .solor-navigation {
+    padding-block: 8px;
+  }
+
+  .solor-layout[data-expanded="false"] .solor-navigation {
+    display: none;
+  }
+}

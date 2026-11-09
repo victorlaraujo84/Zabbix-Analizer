@@ -36,6 +36,7 @@ import {
   SaaSClient,
 } from './utils/saasDB';
 import { Header } from './components/Header';
+import { SolorLayout } from './components/SolorLayout';
 import { UploadZone } from './components/UploadZone';
 import { KPICards } from './components/KPICards';
 import { ExecutiveSummary } from './components/ExecutiveSummary';
@@ -445,9 +446,15 @@ export default function App() {
     );
   }
 
+  const renderWorkspace = (content: React.ReactNode) => (
+    <SolorLayout route={route} companyName={company?.name || 'Zabbix Analyzer'} logo={company?.logoDataUrl}>
+      {content}
+    </SolorLayout>
+  );
+
   // Visualização de Clientes (#/clients)
   if (route === '#/clients') {
-    return (
+    return renderWorkspace(
       <ClientsView
         onBackToApp={() => navigateTo('#/app')}
         onSelectClientForAnalysis={(c) => {
@@ -460,7 +467,7 @@ export default function App() {
 
   // Visualização de Configurações (#/settings)
   if (route === '#/settings') {
-    return (
+    return renderWorkspace(
       <SettingsView
         onBackToApp={() => navigateTo('#/app')}
         theme={theme}
@@ -471,12 +478,12 @@ export default function App() {
 
   // Visualização de Histórico de Relatórios (#/reports)
   if (route === '#/reports') {
-    return <ReportsView onBackToApp={() => navigateTo('#/app')} />;
+    return renderWorkspace(<ReportsView onBackToApp={() => navigateTo('#/app')} />);
   }
 
   // Visualização da Fábrica de Triggers (#/trigger-factory)
   if (route === '#/trigger-factory') {
-    return (
+    return renderWorkspace(
       <TriggerFactoryView
         onBackToApp={() => navigateTo('#/app')}
         clients={clients}
@@ -492,7 +499,7 @@ export default function App() {
 
 
   // TELA PRINCIPAL (DASHBOARD CORE: #/app ou raiz)
-  return (
+  return renderWorkspace(
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors">
       {/* Barra de Navegação Top Bar com White-label, Seletor de Clientes e Roteamento */}
       <Header
@@ -512,12 +519,10 @@ export default function App() {
         totalFiltered={filteredEvents.length}
         totalRaw={rawEvents.length}
         savedSessionsCount={savedSessions.length}
-        company={company}
         currentUser={currentUser}
         clients={clients}
         selectedClientId={selectedClientId}
         onSelectClient={setSelectedClientId}
-        activeRoute={route}
         onNavigate={navigateTo}
         onLogout={handleLogout}
       />
@@ -539,6 +544,18 @@ export default function App() {
       {/* Zero State / Tela Inicial quando nenhum arquivo foi carregado ainda */}
       {rawEvents.length === 0 ? (
         <main className="container mx-auto px-4 py-8">
+          <section className="solor-welcome" aria-labelledby="welcome-title">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wider">Observabilidade e tuning</p>
+            <h1 id="welcome-title" className="mb-2 text-3xl font-semibold">Análise de eventos Zabbix</h1>
+            <p className="mb-5 max-w-xl text-sm">Importe um relatório para analisar incidentes, acompanhar tendências e avaliar triggers.</p>
+            <button
+              type="button"
+              onClick={() => setIsUploadModalOpen(true)}
+              className="cursor-pointer rounded-lg bg-white px-4 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-50 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white"
+            >
+              Importar relatório
+            </button>
+          </section>
           <UploadZone
             onDataLoaded={handleDataLoaded}
             onLoadSample={handleLoadSample}
@@ -588,7 +605,7 @@ export default function App() {
               onClick={() => setActiveView('dashboard')}
               className={`flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
                 activeView === 'dashboard'
-                  ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900 shadow-xs'
+                  ? 'bg-blue-600 text-white shadow-xs'
                   : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
               }`}
             >
@@ -601,7 +618,7 @@ export default function App() {
               onClick={() => setActiveView('trends')}
               className={`flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
                 activeView === 'trends'
-                  ? 'bg-purple-600 text-white shadow-xs'
+                  ? 'bg-blue-600 text-white shadow-xs'
                   : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
               }`}
             >
@@ -622,9 +639,9 @@ export default function App() {
           </div>
 
           {/* Layout Principal: Sidebar de Filtros + Conteúdo Analítico */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <div className="grid grid-cols-1 min-[1250px]:grid-cols-12 gap-6 items-start">
             {/* Sidebar Lateral de Filtros (3 colunas em telas grandes) */}
-            <div className="lg:col-span-3">
+            <div className="min-w-0 min-[1250px]:col-span-3">
               <FilterPanel
                 rawEvents={rawEvents}
                 filteredEvents={filteredEvents}
@@ -635,7 +652,7 @@ export default function App() {
             </div>
 
             {/* Conteúdo Central: Alterna entre Dashboard e Visão de Tendências */}
-            <div className="lg:col-span-9 space-y-6">
+            <div className="min-w-0 min-[1250px]:col-span-9 space-y-6">
               {activeView === 'trends' ? (
                 /* Visão de Tendências (Trends) comparando período atual vs anterior */
                 <TrendsView comparison={trendsComparison} />
